@@ -1,0 +1,13 @@
+# Web API
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+websockets==14.1
+pydantic-settings>=2.4,<3   # NOT pulled in by fastapi; config.py needs it
+
+# SUMO Python bindings + geometry tools.
+# In "managed" mode eclipse-sumo also provides the `sumo` binary in-container.
+# Pin these to match the SUMO version you run (demo built/verified on 1.27.x).
+eclipse-sumo==1.27.1
+traci==1.27.1
+sumolib==1.27.1
+pyproj>=3.6            # REQUIRED for real (projected) OSM nets: convertXY2LonLat

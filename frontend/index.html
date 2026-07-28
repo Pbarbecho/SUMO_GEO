@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SUMO-GEO · Simulación de movilidad 3D en el navegador</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="map"></div>
+
+  <div id="topbar">
+    <button id="zoom-in" class="icon-btn" title="Acercar">+</button>
+    <button id="zoom-out" class="icon-btn" title="Alejar">−</button>
+    <span class="topbar-sep"></span>
+    <button id="rot-left" class="icon-btn" title="Girar a la izquierda (Shift + ←)">↺</button>
+    <button id="rot-north" class="icon-btn" title="Orientar al norte">N</button>
+    <button id="rot-right" class="icon-btn" title="Girar a la derecha (Shift + →)">↻</button>
+    <span class="topbar-sep"></span>
+    <button id="orbit" class="icon-btn" title="Órbita automática">◐</button>
+    <span class="topbar-sep"></span>
+    <button id="view-top" class="icon-btn" title="Vista superior — ver desde arriba">2D</button>
+  </div>
+
+  <div id="panel">
+    <h1>SUMO&nbsp;·&nbsp;GEO</h1>
+    <div class="row">
+      <button id="btn-play">⏸ Pausar</button>
+      <button id="btn-reset">⟳ Reiniciar</button>
+    </div>
+    <label class="row">
+      Velocidad
+      <input id="fps" type="range" min="1" max="30" value="10" />
+      <span id="fps-val">10 fps</span>
+    </label>
+    <label class="row">
+      <input id="toggle-buildings" type="checkbox" checked /> Edificios 3D
+    </label>
+    <label class="row">
+      <input id="toggle-congestion" type="checkbox" checked /> Congestión (LOS)
+    </label>
+    <div id="stats">
+      <div><b id="veh-count">0</b> vehículos</div>
+      <div>t = <b id="sim-time">0</b> s</div>
+      <div id="conn" class="offline">desconectado</div>
+    </div>
+    <div id="legend">
+      <span>Nivel de servicio</span>
+      <div class="ramp">
+        <i style="background:#1a9850"></i>A
+        <i style="background:#66bd63"></i>B
+        <i style="background:#d9ef8b"></i>C
+        <i style="background:#fee08b"></i>D
+        <i style="background:#fc8d59"></i>E
+        <i style="background:#d73027"></i>F
+      </div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/deck.gl@9.0.38/dist.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

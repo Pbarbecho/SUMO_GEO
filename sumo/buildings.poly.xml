@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<additional>
+    <poly id="bld_0" type="building" color="200,180,160" fill="1" layer="1" shape="37.82,29.95 87.01,29.95 87.01,76.37 37.82,76.37 37.82,29.95">
+        <param key="height" value="12.2"/>
+    </poly>
+    <poly id="bld_1" type="building" color="200,180,160" fill="1" layer="1" shape="150.14,32.88 195.06,32.88 195.06,85.00 150.14,85.00 150.14,32.88">
+        <param key="height" value="11.4"/>
+    </poly>
+    <poly id="bld_2" type="building" color="200,180,160" fill="1" layer="1" shape="274.64,44.69 327.46,44.69 327.46,89.63 274.64,89.63 274.64,44.69">
+        <param key="height" value="10.5"/>
+    </poly>
+    <poly id="bld_3" type="building" color="200,180,160" fill="1" layer="1" shape="387.57,35.93 437.92,35.93 437.92,95.55 387.57,95.55 387.57,35.93">
+        <param key="height" value="24.5"/>
+    </poly>
+    <poly id="bld_4" type="building" color="200,180,160" fill="1" layer="1" shape="514.64,36.34 567.29,36.34 567.29,89.48 514.64,89.48 514.64,36.34">
+        <param key="height" value="13.5"/>
+    </poly>
+    <poly id="bld_5" type="building" color="200,180,160" fill="1" layer="1" shape="33.65,148.03 87.88,148.03 87.88,197.98 33.65,197.98 33.65,148.03">
+        <param key="height" value="10.7"/>
+    </poly>
+    <poly id="bld_6" type="building" color="200,180,160" fill="1" layer="1" shape="158.46,153.20 210.41,153.20 210.41,205.70 158.46,205.70 158.46,153.20">
+        <param key="height" value="45.2"/>
+    </poly>
+    <poly id="bld_7" type="building" color="200,180,160" fill="1" layer="1" shape="280.49,149.87 328.46,149.87 328.46,196.75 280.49,196.75 280.49,149.87">
+        <param key="height" value="25.2"/>
+    </poly>
+    <poly id="bld_8" type="building" color="200,180,160" fill="1" layer="1" shape="387.61,159.85 445.61,159.85 445.61,215.52 387.61,215.52 387.61,159.85">
+        <param key="height" value="13.1"/>
+    </poly>
+    <poly id="bld_9" type="building" color="200,180,160" fill="1" layer="1" shape="523.61,154.01 570.25,154.01 570.25,203.48 523.61,203.48 523.61,154.01">
+        <param key="height" value="14.6"/>
+    </poly>
+    <poly id="bld_10" type="building" color="200,180,160" fill="1" layer="1" shape="30.44,274.12 83.60,274.12 83.60,332.13 30.44,332.13 30.44,274.12">
+        <param key="height" value="46.5"/>
+    </poly>
+    <poly id="bld_11" type="building" color="200,180,160" fill="1" layer="1" shape="161.47,270.87 212.76,270.87 212.76,328.31 161.47,328.31 161.47,270.87">
+        <param key="height" value="10.4"/>
+    </poly>
+    <poly id="bld_12" type="building" color="200,180,160" fill="1" layer="1" shape="280.28,277.97 335.50,277.97 335.50,332.33 280.28,332.33 280.28,277.97">
+        <param key="height" value="26.3"/>
+    </poly>
+    <poly id="bld_13" type="building" color="200,180,160" fill="1" layer="1" shape="397.95,272.91 456.15,272.91 456.15,322.46 397.95,322.46 397.95,272.91">
+        <param key="height" value="13.0"/>
+    </poly>
+    <poly id="bld_14" type="building" color="200,180,160" fill="1" layer="1" shape="520.07,274.07 567.56,274.07 567.56,322.67 520.07,322.67 520.07,274.07">
+        <param key="height" value="43.5"/>
+    </poly>
+    <poly id="bld_15" type="building" color="200,180,160" fill="1" layer="1" shape="40.54,398.71 91.73,398.71 91.73,451.50 40.54,451.50 40.54,398.71">
+        <param key="height" value="26.2"/>
+    </poly>
+    <poly id="bld_16" type="building" color="200,180,160" fill="1" layer="1" shape="148.20,388.23 207.98,388.23 207.98,443.15 148.20,443.15 148.20,388.23">
+        <param key="height" value="11.1"/>
+    </poly>
+    <poly id="bld_17" type="building" color="200,180,160" fill="1" layer="1" shape="275.90,397.56 323.62,397.56 323.62,445.29 275.90,445.29 275.90,397.56">
+        <param key="height" value="23.7"/>
+    </poly>
+    <poly id="bld_18" type="building" color="200,180,160" fill="1" layer="1" shape="398.59,390.82 444.92,390.82 444.92,443.37 398.59,443.37 398.59,390.82">
+        <param key="height" value="17.1"/>
+    </poly>
+    <poly id="bld_19" type="building" color="200,180,160" fill="1" layer="1" shape="516.70,385.92 568.94,385.92 568.94,439.80 516.70,439.80 516.70,385.92">
+        <param key="height" value="36.4"/>
+    </poly>
+    <poly id="bld_20" type="building" color="200,180,160" fill="1" layer="1" shape="33.25,509.20 83.56,509.20 83.56,560.90 33.25,560.90 33.25,509.20">
+        <param key="height" value="18.6"/>
+    </poly>
+    <poly id="bld_21" type="building" color="200,180,160" fill="1" layer="1" shape="150.76,514.26 196.52,514.26 196.52,567.87 150.76,567.87 150.76,514.26">
+        <param key="height" value="15.7"/>
+    </poly>
+    <poly id="bld_22" type="building" color="200,180,160" fill="1" layer="1" shape="268.42,515.46 322.24,515.46 322.24,560.58 268.42,560.58 268.42,515.46">
+        <param key="height" value="27.7"/>
+    </poly>
+    <poly id="bld_23" type="building" color="200,180,160" fill="1" layer="1" shape="387.03,514.02 440.66,514.02 440.66,565.60 387.03,565.60 387.03,514.02">
+        <param key="height" value="45.9"/>
+    </poly>
+    <poly id="bld_24" type="building" color="200,180,160" fill="1" layer="1" shape="519.50,520.69 568.49,520.69 568.49,567.00 519.50,567.00 519.50,520.69">
+        <param key="height" value="48.0"/>
+    </poly>
+</additional>

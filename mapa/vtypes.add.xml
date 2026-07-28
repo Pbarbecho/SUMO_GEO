@@ -1,0 +1,45 @@
+<routes>
+    
+    <!-- Chevrolet -->
+    <vType id="chevrolet_aveo" accel="2.8" decel="4.5" sigma="0.5" length="4.3" minGap="2.5" carFollowModel="Krauss" vClass="evehicle"   mass="1160" personCapacity="5" maxSpeed="55.55" color="#FB0101"/>
+    <vType id="chevrolet_spark" accel="2.9" decel="4.5" sigma="0.5" length="3.6" minGap="2.5" carFollowModel="Krauss" vClass="evehicle" guiShape="passenger/hatchback"  mass="840" personCapacity="4" maxSpeed="55.55" color="#00FF00"/>
+    <vType id="chevrolet_vitara" accel="2.8" decel="4.5" sigma="0.5" length="4.2" minGap="2.5" carFollowModel="Krauss" vClass="evehicle"  mass="1300" personCapacity="5" maxSpeed="55.55" color="#0000FF"/>
+    <vType id="chevrolet_sail" accel="2.7" decel="4.5" sigma="0.5" length="4.3" minGap="2.5" carFollowModel="Krauss" vClass="evehicle" guiShape="passenger/sedan"  mass="1090" personCapacity="5" maxSpeed="55.55" color="#FFFF00"/>
+    <vType id="chevrolet_dmax" accel="2.6" decel="4.5" sigma="0.5" length="5.3" minGap="2.5" carFollowModel="Krauss" vClass="evehicle"  mass="1760" personCapacity="5" maxSpeed="55.55" color="#FF00FF"/>
+
+    <!-- Toyota -->
+    <vType id="toyota_yaris" accel="2.7" decel="4.5" sigma="0.5" length="4.1" minGap="2.5" carFollowModel="Krauss" vClass="evehicle"  mass="1050" personCapacity="5" maxSpeed="55.55" color="#00FFFF"/>
+    <vType id="toyota_corolla" accel="2.6" decel="4.4" sigma="0.5" length="4.6" minGap="2.5" carFollowModel="Krauss" vClass="evehicle" guiShape="passenger/sedan"  mass="1400" personCapacity="5" maxSpeed="55.55" color="#800080"/>
+    <vType id="toyota_fortuner" accel="2.6" decel="4.5" sigma="0.5" length="4.8" minGap="2.5" carFollowModel="Krauss" vClass="evehicle" guiShape="passenger/wagon"  mass="1750" personCapacity="7" maxSpeed="55.55" color="#FFA500"/>
+
+    <!-- Mitsubishi -->
+    <vType id="mitsubishi_asx" accel="2.8" decel="4.5" sigma="0.5" length="4.3" minGap="2.5" carFollowModel="Krauss" vClass="evehicle" guiShape="passenger/wagon"  mass="1360" personCapacity="5" maxSpeed="55.55" color="#FFC0CB"/>
+    <vType id="mitsubishi_lancer" accel="2.8" decel="4.5" sigma="0.5" length="4.5" minGap="2.5" carFollowModel="Krauss" vClass="evehicle" guiShape="passenger/sedan"  mass="1380" personCapacity="5" maxSpeed="55.55" color="#A52A2A"/>
+    <vType id="mitsubishi_l200" accel="2.7" decel="4.5" sigma="0.5" length="5.2" minGap="2.5" carFollowModel="Krauss" vClass="evehicle"  mass="1900" personCapacity="5" maxSpeed="55.55" color="#008080"/>
+    <vType id="mitsubishi_montero" accel="2.6" decel="4.5" sigma="0.5" length="4.9" minGap="2.5" carFollowModel="Krauss" vClass="evehicle" guiShape="passenger/wagon"  mass="2020" personCapacity="7" maxSpeed="55.55" color="#FFD700"/>
+
+    <!-- Kia -->
+    <vType id="kia_rio" accel="2.7" decel="4.5" sigma="0.5" length="4.1" minGap="2.5" carFollowModel="Krauss" vClass="evehicle" guiShape="passenger/sedan"  mass="1120" personCapacity="5" maxSpeed="55.55" color="#FF4500"/>
+    <vType id="kia_sportage" accel="2.8" decel="4.5" sigma="0.5" length="4.4" minGap="2.5" carFollowModel="Krauss" vClass="evehicle" guiShape="passenger/wagon"  mass="1410" personCapacity="5" maxSpeed="55.55" color="#2E8B57"/>
+    <vType id="kia_picanto" accel="2.9" decel="4.5" sigma="0.5" length="3.6" minGap="2.5" carFollowModel="Krauss" vClass="evehicle" guiShape="passenger/sedan"  mass="880" personCapacity="4" maxSpeed="55.55" color="#1E90FF"/>
+
+    <!-- Hyundai -->
+    <vType id="hyundai_tucson" accel="2.8" decel="4.5" sigma="0.5" length="4.4" minGap="2.5" carFollowModel="Krauss" vClass="evehicle" guiShape="passenger/wagon"  mass="1450" personCapacity="5" maxSpeed="55.55" color="#DA70D6"/>
+    <vType id="hyundai_creta" accel="2.8" decel="4.5" sigma="0.5" length="4.3" minGap="2.5" carFollowModel="Krauss" vClass="evehicle" guiShape="passenger/sedan"  mass="1420" personCapacity="5" maxSpeed="55.55" color="#B0E0E6"/>
+    <vType id="hyundai_grand_i10" accel="2.9" decel="4.5" sigma="0.5" length="3.7" minGap="2.5" carFollowModel="Krauss" vClass="evehicle" guiShape="passenger/hatchback"  mass="920" personCapacity="4" maxSpeed="55.55" color="#FF6347"/>
+    <vType id="hyundai_hilux" accel="2.7" decel="4.5" sigma="0.5" length="5.3" minGap="2.5" carFollowModel="Krauss" vClass="evehicle"  mass="1980" personCapacity="5" maxSpeed="55.55" color="#4682B4"/>
+
+    <!-- Nissan -->
+    <vType id="nissan_sentra" accel="2.6" decel="4.5" sigma="0.5" length="4.6" minGap="2.5" carFollowModel="Krauss" vClass="evehicle"  mass="1230" personCapacity="5" maxSpeed="55.55" color="#800000"/>
+
+    <!-- Mazda -->
+    <vType id="mazda_3" accel="2.9" decel="4.5" sigma="0.5" length="4.5" minGap="2.5" carFollowModel="Krauss" vClass="evehicle" guiShape="passenger/sedan"  mass="1350" personCapacity="5" maxSpeed="55.55" color="#808000"/>
+    <vType id="mazda_bt50" accel="2.7" decel="4.5" sigma="0.5" length="5.2" minGap="2.5" carFollowModel="Krauss" vClass="evehicle"  mass="1800" personCapacity="5" maxSpeed="55.55" color="#708090"/>
+
+    <!-- Volkswagen -->
+    <vType id="volkswagen_gol" accel="2.8" decel="4.6" sigma="0.5" length="4.0" minGap="2.5" carFollowModel="Krauss" vClass="evehicle" guiShape="passenger/hatchback"  mass="1070" personCapacity="5" maxSpeed="55.55" color="#D2691E"/>
+
+    <!-- Suzuki -->
+    <vType id="suzuki_grand_vitara" accel="2.5" decel="4.4" sigma="0.5" length="4.5" minGap="2.5" carFollowModel="Krauss" vClass="evehicle" guiShape="passenger/wagon"  mass="1350" personCapacity="5" maxSpeed="55.55" color="#8B4513"/>
+	
+</routes>

@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Env
+.env
+backend/.env
+
+# SUMO run artifacts
+sumo/*.tripinfo.xml
+sumo/tmp.*
+sumo/trips.xml
+sumo/*.log
+
+# Large / regenerable SUMO data (too big for a normal git repo)
+# (use Git LFS if you really need mapa/network.net.xml versioned)
+mapa/*.net.xml
+sumo/*_bbox.osm.xml
+sumo/*.trips.xml
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

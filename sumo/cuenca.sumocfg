@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <input>
+        <net-file value="cuenca.net.xml"/>
+        <route-files value="cuenca.rou.xml"/>
+        <additional-files value="cuenca.poly.xml"/>
+    </input>
+    <time><begin value="0"/><end value="600"/><step-length value="1.0"/></time>
+    <processing><ignore-route-errors value="true"/></processing>
+    <report><no-step-log value="true"/></report>
+</configuration>
