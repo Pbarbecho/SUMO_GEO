@@ -7,8 +7,8 @@ MapLibre GL JS + deck.gl stack — the same stack that
 [GeoLibre](https://github.com/opengeos/GeoLibre) productizes.
 
 ```
- SUMO (Docker) ──TraCI──► FastAPI backend ──REST──►  network + buildings (GeoJSON)
-                                          └─WebSocket► vehicles + per-edge LOS  ──► MapLibre + deck.gl (browser)
+ SUMO (Docker) ──TraCI──► FastAPI backend ──REST──►  network + buildings + traffic lights (GeoJSON)
+                                          └─WebSocket► vehicles + per-edge LOS + signal state ──► MapLibre + deck.gl (browser)
 ```
 
 > Prototype status. It ships a runnable demo scenario (a 6×6 grid with 400
@@ -57,12 +57,15 @@ For the no-Docker frontend, point `API`/`WS_URL` in `frontend/app.js` at
 ### Backend modules
 
 - `config.py` — env-driven settings (`APP_*`).
-- `geo.py` — network → GeoJSON edges, polygons → extrudable buildings, and
-  coordinate conversion. Projected (OSM) nets use SUMO's projection; synthetic
-  nets are anchored to `APP_ORIGIN_LON/LAT` with an ENU approximation.
-- `sumo_bridge.py` — TraCI/libsumo lifecycle, `managed` vs `remote` modes.
+- `geo.py` — network → GeoJSON edges, polygons → extrudable buildings,
+  **traffic-light positions** (one per approach, mast-arm vs. straight pole by
+  building proximity), and coordinate conversion. Projected (OSM) nets use SUMO's
+  projection; synthetic nets use the `APP_ORIGIN_LON/LAT` ENU anchor.
+- `sumo_bridge.py` — TraCI/libsumo lifecycle (unique connection label per
+  WebSocket), vehicles + live **signal state** per step, `managed` vs `remote`.
 - `traffic.py` — density (veh/km/lane) → HCM-style LOS + colour ramp.
-- `main.py` — REST (`/api/network`, `/api/buildings`, `/api/meta`) + `WS /ws/live`.
+- `main.py` — REST (`/api/network`, `/api/buildings`, `/api/trafficlights`,
+  `/api/meta`) + `WS /ws/live` (vehicles, per-edge LOS, signal colours).
 
 ### Connecting to *your* SUMO container (remote mode)
 
@@ -116,6 +119,45 @@ Overture Maps → export GeoJSON) — it shares this exact MapLibre+deck.gl runt
 
 > Note: projected networks require `pyproj` (already in `requirements.txt`). The
 > synthetic grid uses the ENU anchor (`APP_ORIGIN_LON/LAT`) and needs no pyproj.
+
+## Changing the map / scenario
+
+Everything the viewer draws — the **road network**, **building footprints** and
+**traffic lights** — is derived automatically from the SUMO scenario when the
+backend starts. There is **no manual step to "generate" the traffic lights**: the
+backend reads them from the network (`net.getTrafficLights()`), computes each
+signal's position and its mast-arm vs. straight-pole style, and streams the live
+signal colours from SUMO over TraCI. So changing the map is just:
+
+1. Produce the new scenario (see *Using a real city* above, or bring your own
+   `.net.xml` + `.poly.xml` + `.sumocfg`) and place it under `sumo/`.
+2. Point the backend at it in `docker-compose.yml`:
+   ```yaml
+   environment:
+     APP_SUMO_CONFIG: /sumo/<your>.sumocfg
+   ```
+3. Restart the backend so it recomputes the static geometry, then hard-refresh
+   the browser (Cmd/Ctrl + Shift + R):
+   ```bash
+   docker compose up -d --build      # or: docker compose restart backend
+   ```
+
+The new network, buildings and signals appear automatically — nothing is cached
+to disk, the geometry is rebuilt on each backend start.
+
+**Requirements for the new network**
+
+- **Traffic lights must exist in the `.net.xml`.** OSM often lacks them, so build
+  the network with guessed signals:
+  `netconvert --osm-files city.osm -o city.net.xml --tls.guess`. If the net has no
+  TLS, no signals are shown (they simply don't exist — it's not an error).
+  `scripts/build_city.sh` already enables `--tls.guess`.
+- **Use the matching `.poly.xml`** for that area — buildings drive both the 3D
+  extrusion and the mast-arm vs. straight-pole choice (a junction with no building
+  within ~9 m gets a mast-arm). Tune the threshold via the `clearance` argument of
+  `trafficlights_geojson` in `backend/app/geo.py`.
+- Projected (OSM) networks georeference exactly via `pyproj`; synthetic grids use
+  the `APP_ORIGIN_LON/LAT` ENU anchor.
 
 ## Tool evaluation
 

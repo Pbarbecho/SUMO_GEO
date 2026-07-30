@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <input>
+        <net-file value="cuenca.net.xml"/>
+        <route-files value="vtypes.add.xml,transit.add.xml,cuenca_low.rou.xml"/>
+    </input>
+    <time><begin value="0"/><end value="86400"/><step-length value="1.0"/></time>
+    <processing>
+        <ignore-route-errors value="true"/>
+        <time-to-teleport value="120"/>
+    </processing>
+    <report><no-step-log value="true"/></report>
+</configuration>

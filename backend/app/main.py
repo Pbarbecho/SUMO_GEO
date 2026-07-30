@@ -23,7 +23,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import settings
-from .geo import NetworkGeo, buildings_geojson, cfg_paths
+from .geo import (NetworkGeo, buildings_geojson, building_vertices_local,
+                  cfg_paths, trafficlights_geojson)
 from .sumo_bridge import SumoBridge
 from .traffic import edge_estimation
 
@@ -42,6 +43,8 @@ async def lifespan(app: FastAPI):
     _state["netgeo"] = netgeo
     _state["network"] = netgeo.edges_geojson()
     _state["buildings"] = buildings_geojson(poly_file, netgeo)
+    _state["trafficlights"] = trafficlights_geojson(
+        netgeo, building_vertices_local(poly_file))
     _state["meta"] = {
         **netgeo.bounds_center(),
         "origin": [settings.origin_lon, settings.origin_lat],
@@ -80,6 +83,11 @@ async def network():
 @app.get("/api/buildings")
 async def buildings():
     return JSONResponse(_state["buildings"])
+
+
+@app.get("/api/trafficlights")
+async def trafficlights():
+    return JSONResponse(_state["trafficlights"])
 
 
 @app.websocket("/ws/live")
@@ -139,6 +147,7 @@ async def ws_live(ws: WebSocket):
                 "t": round(t, 1),
                 "vehicles": bridge.vehicles(netgeo),
                 "edges": edge_estimation(bridge.conn, netgeo),
+                "tls": bridge.trafficlights(),
             })
 
             if bridge.min_expected_number() <= 0:

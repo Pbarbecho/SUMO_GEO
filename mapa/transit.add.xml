@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Public-transport vehicle types (buses run on all road edges). -->
+<routes>
+    <vType id="bus" vClass="bus" guiShape="bus" length="12.0" width="2.55"
+           accel="1.2" decel="4.0" sigma="0.5" minGap="3.0" maxSpeed="16.6"
+           personCapacity="60" color="250,150,20"/>
+</routes>

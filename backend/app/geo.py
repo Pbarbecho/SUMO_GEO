@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 import os
 import xml.etree.ElementTree as ET
+from collections import defaultdict
 from typing import Optional
 
 import sumolib
@@ -139,4 +140,67 @@ def buildings_geojson(poly_path: Optional[str], netgeo: NetworkGeo) -> dict:
             "geometry": {"type": "Polygon", "coordinates": [ring]},
             "properties": {"id": poly.get("id"), "height": height},
         })
+    return {"type": "FeatureCollection", "features": features}
+
+
+def building_vertices_local(poly_path: Optional[str]) -> list:
+    """All building-polygon vertices in SUMO local (x, y) metres."""
+    verts: list = []
+    if not poly_path or not os.path.exists(poly_path):
+        return verts
+    root = ET.parse(poly_path).getroot()
+    for poly in root.iter("poly"):
+        ptype = poly.get("type", "") or ""
+        if ptype and not ptype.startswith("building"):
+            continue
+        for pair in poly.get("shape", "").split():
+            parts = pair.split(",")
+            if len(parts) >= 2:
+                verts.append((float(parts[0]), float(parts[1])))
+    return verts
+
+
+def trafficlights_geojson(netgeo: NetworkGeo, building_verts: Optional[list] = None,
+                          clearance: float = 9.0) -> dict:
+    """One signal per traffic light and incoming edge (approach), at the stop
+    line. Each feature carries the tls id, a representative link index (for the
+    live colour), the approach bearing, and ``mast``: True where the junction is
+    open (no building within ``clearance`` m) so the frontend draws a mast-arm;
+    False elsewhere, where it draws a straight roadside pole.
+    """
+    c2 = clearance * clearance
+    features: list[dict] = []
+    for tls in netgeo.net.getTrafficLights():
+        tid = tls.getID()
+        by_edge: dict = defaultdict(list)          # edgeID -> [(inLane, linkIndex), ...]
+        for conn in tls.getConnections():
+            in_lane, _out_lane, link_index = conn[0], conn[1], conn[2]
+            by_edge[in_lane.getEdge().getID()].append((in_lane, link_index))
+
+        for eid, items in by_edge.items():
+            ends = [ln.getShape()[-1] for ln, _ in items if len(ln.getShape()) >= 2]
+            if not ends:
+                continue
+            cx = sum(p[0] for p in ends) / len(ends)   # centre of the approach stop line
+            cy = sum(p[1] for p in ends) / len(ends)
+            rep_lane = sorted(items, key=lambda it: it[0].getID())[len(items) // 2][0]
+            rs = rep_lane.getShape()
+            (x1, y1), (x0, y0) = rs[-1], rs[-2]
+            length = math.hypot(x1 - x0, y1 - y0) or 1.0
+            ux, uy = (x1 - x0) / length, (y1 - y0) / length
+            bearing = (math.degrees(math.atan2(ux, uy))) % 360
+            rep_index = sorted(i for _l, i in items)[len(items) // 2]
+            mast = True
+            if building_verts:
+                for vx, vy in building_verts:
+                    if (cx - vx) ** 2 + (cy - vy) ** 2 < c2:
+                        mast = False       # a building is close -> straight pole
+                        break
+            lon, lat = netgeo.xy_to_lonlat(cx - ux * 2.5, cy - uy * 2.5)
+            features.append({
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                "properties": {"id": f"{tid}.{eid}", "tls": tid, "index": rep_index,
+                               "angle": round(bearing, 1), "mast": mast},
+            })
     return {"type": "FeatureCollection", "features": features}

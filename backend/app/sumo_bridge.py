@@ -10,12 +10,17 @@ libsumo (in-process, faster, no socket) is used automatically when
 """
 from __future__ import annotations
 
+import itertools
+
 from .config import settings
+
+_CONN_COUNTER = itertools.count()   # unique traci connection labels
 
 
 class SumoBridge:
     def __init__(self):
-        self.conn = None          # traci or libsumo module (same interface)
+        self.conn = None          # the (labeled) traci connection or libsumo module
+        self.label = None
         self.running = False
         self._libsumo = False
 
@@ -35,16 +40,25 @@ class SumoBridge:
         if settings.sumo_mode == "remote" and not self._libsumo:
             # Connect to an already-running SUMO server (your existing container).
             client.init(host=settings.sumo_host, port=settings.sumo_port)
+            self.conn = client
         else:
             from sumolib import checkBinary
             binary = checkBinary(settings.sumo_binary)
-            client.start([
+            args = [
                 binary,
                 "-c", settings.sumo_config,
                 "--step-length", str(settings.step_length),
                 "--start", "--quit-on-end",
-            ])
-        self.conn = client
+            ]
+            if self._libsumo:
+                client.start(args)
+                self.conn = client
+            else:
+                # unique label so reconnecting WebSockets don't clash on traci's
+                # single global 'default' connection
+                self.label = f"ws{next(_CONN_COUNTER)}"
+                client.start(args, label=self.label)
+                self.conn = client.getConnection(self.label)
         self.running = True
 
     def step(self) -> float:
@@ -67,6 +81,12 @@ class SumoBridge:
                 "edge": conn.vehicle.getRoadID(vid),
             })
         return out
+
+    def trafficlights(self) -> dict:
+        """Current signal-state string per traffic light (SUMO r/y/g/G/u/o codes)."""
+        conn = self.conn
+        return {tid: conn.trafficlight.getRedYellowGreenState(tid)
+                for tid in conn.trafficlight.getIDList()}
 
     def min_expected_number(self) -> int:
         """0 when no vehicles remain and none are scheduled -> simulation done."""
