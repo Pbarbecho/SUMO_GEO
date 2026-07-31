@@ -25,3 +25,4 @@ sumo/*.trips.xml
 .DS_Store
 .idea/
 .vscode/
+~$*          # MS Office lock files (e.g. docs/~$Matriz…xlsx)

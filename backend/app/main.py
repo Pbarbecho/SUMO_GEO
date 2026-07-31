@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -95,8 +96,17 @@ async def ws_live(ws: WebSocket):
     await ws.accept()
     netgeo = _state["netgeo"]
     bridge = SumoBridge()
+
+    # traffic level (low/mid/high) selected in the app -> its own scenario file
+    level = (ws.query_params.get("level") or "").lower()
+    cfg, begin = None, None
+    if level in ("low", "mid", "high"):
+        candidate = settings.sumo_config_template.format(level=level)
+        if os.path.exists(candidate):
+            cfg, begin = candidate, settings.sim_begin
+
     try:
-        bridge.start()
+        bridge.start(config=cfg, begin=begin)
     except Exception as exc:  # noqa: BLE001 - surface the reason to the client + logs
         import traceback
         traceback.print_exc()  # real cause visible in `docker compose logs backend`

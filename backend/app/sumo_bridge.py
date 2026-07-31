@@ -35,7 +35,7 @@ class SumoBridge:
         import traci
         return traci
 
-    def start(self) -> None:
+    def start(self, config: str | None = None, begin: float | None = None) -> None:
         client = self._import_client()
         if settings.sumo_mode == "remote" and not self._libsumo:
             # Connect to an already-running SUMO server (your existing container).
@@ -46,10 +46,12 @@ class SumoBridge:
             binary = checkBinary(settings.sumo_binary)
             args = [
                 binary,
-                "-c", settings.sumo_config,
+                "-c", config or settings.sumo_config,
                 "--step-length", str(settings.step_length),
                 "--start", "--quit-on-end",
             ]
+            if begin is not None:
+                args += ["--begin", str(begin)]
             if self._libsumo:
                 client.start(args)
                 self.conn = client

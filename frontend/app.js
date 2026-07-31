@@ -9,6 +9,7 @@ const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://")
 const els = {
   play: document.getElementById("btn-play"),
   reset: document.getElementById("btn-reset"),
+  level: document.getElementById("level"),
   fps: document.getElementById("fps"),
   fpsVal: document.getElementById("fps-val"),
   buildings: document.getElementById("toggle-buildings"),
@@ -35,6 +36,7 @@ let tlState = {};         // tlsID -> live state string ("GrGr...")
 let paused = false;
 let showCongestion = true;
 let showTL = true;
+let currentLevel = "mid";   // scenario level (low/mid/high) from the mapa/ files
 
 // speed (m/s) -> colour ramp (red slow → green fast)
 function speedColor(v) {
@@ -252,7 +254,7 @@ function refreshLayers() {
 let manualClose = false;
 function connect() {
   manualClose = false;
-  ws = new WebSocket(WS_URL);
+  ws = new WebSocket(WS_URL + "?level=" + currentLevel);
   ws.onopen = () => setConn(true);
   ws.onclose = () => { setConn(false); if (!manualClose) setTimeout(connect, 2000); };
   ws.onerror = () => setConn(false);
@@ -287,6 +289,13 @@ els.play.onclick = () => {
 els.reset.onclick = () => {
   if (ws) { manualClose = true; ws.close(); }
   vehicles = []; edgeColors = {}; refreshLayers();
+  paused = false; els.play.textContent = "⏸ Pausar";
+  connect();
+};
+els.level.onchange = () => {
+  currentLevel = els.level.value;                 // switch scenario -> reconnect
+  if (ws) { manualClose = true; ws.close(); }
+  vehicles = []; edgeColors = {}; tlState = {}; refreshLayers();
   paused = false; els.play.textContent = "⏸ Pausar";
   connect();
 };

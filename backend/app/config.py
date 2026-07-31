@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     use_libsumo: bool = False                  # use in-process libsumo if available
     step_length: float = 1.0                   # seconds per simulation step
 
+    # Per-level scenarios (low/mid/high) selectable from the app. {level} is
+    # substituted; the WebSocket picks the level from its ?level= query param.
+    sumo_config_template: str = "/mapa/metro_{level}.sumocfg"
+    sim_begin: float = 25200.0                 # level runs open at 07:00 (traffic already flowing)
+
     # Optional explicit file overrides (otherwise parsed from the .sumocfg)
     net_file: str | None = None
     poly_file: str | None = None

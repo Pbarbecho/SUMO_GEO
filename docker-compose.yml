@@ -11,9 +11,15 @@ services:
     build: ./backend
     environment:
       APP_SUMO_MODE: managed
-      APP_SUMO_CONFIG: /sumo/cuenca.sumocfg   # real Cuenca (run scripts/build_city.sh first); use demo.sumocfg for the synthetic grid
-      APP_ORIGIN_LON: "-79.0045"     # anchor for the synthetic (non-geo) demo net
-      APP_ORIGIN_LAT: "-2.9006"      # Cuenca, Ecuador
+      # Base geometry loads from this scenario; the app's traffic-level selector
+      # (Bajo/Medio/Alto) switches routes via APP_SUMO_CONFIG_TEMPLATE.
+      APP_SUMO_CONFIG: /mapa/metro_mid.sumocfg
+      APP_SUMO_CONFIG_TEMPLATE: /mapa/metro_{level}.sumocfg
+      # For the lighter Cuenca-centro scenario with buildings, use instead:
+      #   APP_SUMO_CONFIG: /sumo/cuenca_mid.sumocfg
+      #   APP_SUMO_CONFIG_TEMPLATE: /sumo/cuenca_{level}.sumocfg
+      APP_ORIGIN_LON: "-79.0045"
+      APP_ORIGIN_LAT: "-2.9006"
       APP_MAX_FPS: "10"
       # --- remote mode (reuse your own SUMO container) ---
       # APP_SUMO_MODE: remote
@@ -21,6 +27,7 @@ services:
       # APP_SUMO_PORT: "8813"
     volumes:
       - ./sumo:/sumo:ro
+      - ./mapa:/mapa:ro
     ports:
       - "8000:8000"
 
