@@ -12,9 +12,17 @@ from __future__ import annotations
 
 import itertools
 
+import traci.constants as tc
+
 from .config import settings
 
 _CONN_COUNTER = itertools.count()   # unique traci connection labels
+
+# Per-vehicle variables streamed via TraCI subscriptions: the whole fleet arrives
+# in ONE round trip per step instead of ~6 socket calls per vehicle. This is what
+# makes thousands of concurrent vehicles feasible.
+_SUB_VARS = (tc.VAR_POSITION, tc.VAR_ANGLE, tc.VAR_SPEED, tc.VAR_TYPE,
+             tc.VAR_ROAD_ID)
 
 
 class SumoBridge:
@@ -63,9 +71,19 @@ class SumoBridge:
                 client.start(args, label=self.label)
                 self.conn = client.getConnection(self.label)
         self.running = True
+        try:                                    # vehicles already in the run (mid-day start)
+            for vid in self.conn.vehicle.getIDList():
+                self.conn.vehicle.subscribe(vid, _SUB_VARS)
+        except Exception:
+            pass
 
     def step(self) -> float:
         self.conn.simulationStep()
+        try:                                    # keep the subscription set complete
+            for vid in self.conn.simulation.getDepartedIDList():
+                self.conn.vehicle.subscribe(vid, _SUB_VARS)
+        except Exception:
+            pass
         return self.conn.simulation.getTime()
 
     def _type_dims(self, type_id: str) -> tuple[float, float]:
@@ -83,6 +101,35 @@ class SumoBridge:
 
     def vehicles(self, netgeo) -> list[dict]:
         conn = self.conn
+        res = {}
+        try:
+            res = conn.vehicle.getAllSubscriptionResults()   # whole fleet, 1 round trip
+        except Exception:
+            res = {}
+        if not res and conn.vehicle.getIDCount() > 0:
+            return self._vehicles_polled(netgeo)             # safety fallback
+        out = []
+        for vid, r in res.items():
+            x, y = r[tc.VAR_POSITION]
+            lon, lat = netgeo.xy_to_lonlat(x, y)
+            vtype = r[tc.VAR_TYPE]
+            length, width = self._type_dims(vtype)
+            out.append({
+                "id": vid,
+                "lon": lon,
+                "lat": lat,
+                "angle": round(r[tc.VAR_ANGLE], 1),
+                "speed": round(r[tc.VAR_SPEED], 2),
+                "type": vtype,
+                "len": length,
+                "wid": width,
+                "edge": r[tc.VAR_ROAD_ID],
+            })
+        return out
+
+    def _vehicles_polled(self, netgeo) -> list[dict]:
+        """Old per-vehicle polling path (used only if subscriptions are empty)."""
+        conn = self.conn
         out = []
         for vid in conn.vehicle.getIDList():
             x, y = conn.vehicle.getPosition(vid)
@@ -90,14 +137,10 @@ class SumoBridge:
             vtype = conn.vehicle.getTypeID(vid)
             length, width = self._type_dims(vtype)
             out.append({
-                "id": vid,
-                "lon": lon,
-                "lat": lat,
+                "id": vid, "lon": lon, "lat": lat,
                 "angle": round(conn.vehicle.getAngle(vid), 1),
                 "speed": round(conn.vehicle.getSpeed(vid), 2),
-                "type": vtype,
-                "len": length,
-                "wid": width,
+                "type": vtype, "len": length, "wid": width,
                 "edge": conn.vehicle.getRoadID(vid),
             })
         return out

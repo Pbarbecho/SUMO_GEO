@@ -24,16 +24,29 @@ def level_of_service(density: float) -> tuple[str, str]:
     return "F", "#d73027"
 
 
-def edge_estimation(conn, netgeo) -> list[dict]:
+def edge_estimation(conn, netgeo, active_edges=None) -> list[dict]:
     """Return per-edge congestion state for edges that currently hold vehicles.
 
+    ``active_edges`` (the edge ids from the current vehicle list) restricts the
+    TraCI queries to O(vehicles) instead of O(edges) — on a metropolitan net
+    (34k+ edges) polling every edge each step dominates the frame time.
     Empty edges are omitted to keep the WebSocket payload small; the frontend
     renders them at free-flow by default.
     """
+    if active_edges is not None:
+        edges = []
+        for eid in set(active_edges):
+            if not eid or eid.startswith(":"):     # skip internal junction edges
+                continue
+            try:
+                edges.append(netgeo.net.getEdge(eid))
+            except Exception:
+                continue
+    else:
+        edges = [e for e in netgeo.net.getEdges() if not e.isSpecial()]
+
     out: list[dict] = []
-    for edge in netgeo.net.getEdges():
-        if edge.isSpecial():
-            continue
+    for edge in edges:
         eid = edge.getID()
         n = conn.edge.getLastStepVehicleNumber(eid)
         if n == 0:

@@ -155,11 +155,13 @@ async def ws_live(ws: WebSocket):
                 continue
 
             t = bridge.step()
+            vehs = bridge.vehicles(netgeo)
             await ws.send_json({
                 "type": "frame",
                 "t": round(t, 1),
-                "vehicles": bridge.vehicles(netgeo),
-                "edges": edge_estimation(bridge.conn, netgeo),
+                "vehicles": vehs,
+                "edges": edge_estimation(bridge.conn, netgeo,
+                                         (v["edge"] for v in vehs)),
                 "tls": bridge.trafficlights(),
             })
 

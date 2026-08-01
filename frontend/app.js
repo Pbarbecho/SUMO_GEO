@@ -42,6 +42,9 @@ let laneLinesGeo = { type: "FeatureCollection", features: [] };  // edges with 2
 let edgeColors = {};      // edgeId -> [r,g,b]
 let edgeCounts = {};      // edgeId -> vehicle count (n) in the latest frame
 let edgeMid = {};         // edgeId -> [lon,lat] midpoint (for the busy-street icons)
+let losStamp = 0;         // bumped when a new LOS snapshot is accepted (throttled)
+let lastLosMs = 0;
+const LOS_UPDATE_MS = 700; // recolouring 34k+ edges every frame is wasteful — throttle it
 let vehicles = [];        // latest frame vehicles
 let tlDefs = { type: "FeatureCollection", features: [] };  // static signal positions
 let tlState = {};         // tlsID -> live state string ("GrGr...")
@@ -91,8 +94,11 @@ function partRect(d, L, W, alongFrac, lenFrac, widFrac) {
   return [corner(1, -1), corner(1, 1), corner(-1, 1), corner(-1, -1)];
 }
 
-// Procedural 3D vehicle: several extruded parts (chassis, greenhouse/windshield,
-// roof, head/tail lights) at real size — 100% offline, perfect orientation.
+const SHADOW = [10, 12, 16, 105];      // soft contact shadow under each vehicle
+const TIRE = [22, 24, 28];
+
+// Procedural 3D vehicle: extruded parts (contact shadow, chassis, wheels,
+// greenhouse/windshield, roof, head/tail lights) at real size — 100% offline.
 function vehicleParts(d) {
   const L = d.len || (isBus(d) ? 12 : 4.5);
   const W = d.wid || (isBus(d) ? 2.55 : 1.8);
@@ -100,7 +106,10 @@ function vehicleParts(d) {
   const roof = darken(body, 0.82);
   if (isBus(d)) {
     return [
-      { polygon: partRect(d, L, W, 0.00, 1.00, 1.00), height: 2.6, color: body },       // chassis
+      { polygon: partRect(d, L * 1.06, W * 1.25, 0, 1, 1), height: 0.03, color: SHADOW },// contact shadow
+      { polygon: partRect(d, L, W, 0.30, 0.10, 1.02), height: 0.55, color: TIRE },       // front axle/wheels
+      { polygon: partRect(d, L, W, -0.28, 0.10, 1.02), height: 0.55, color: TIRE },      // rear axle/wheels
+      { polygon: partRect(d, L, W, 0.00, 1.00, 1.00), height: 2.6, color: body },        // chassis
       { polygon: partRect(d, L, W, 0.00, 0.96, 0.90), height: 2.8, color: roof },        // roof cap
       { polygon: partRect(d, L, W, 0.46, 0.06, 0.90), height: 2.2, color: GLASS },       // windshield
       { polygon: partRect(d, L, W, 0.49, 0.02, 0.94), height: 1.0, color: HEADLIGHT },   // headlights
@@ -108,11 +117,26 @@ function vehicleParts(d) {
     ];
   }
   return [
+    { polygon: partRect(d, L * 1.10, W * 1.30, 0, 1, 1), height: 0.03, color: SHADOW },  // contact shadow
+    { polygon: partRect(d, L, W, 0.32, 0.14, 1.04), height: 0.34, color: TIRE },         // front wheels
+    { polygon: partRect(d, L, W, -0.32, 0.14, 1.04), height: 0.34, color: TIRE },        // rear wheels
     { polygon: partRect(d, L, W, 0.00, 1.00, 1.00), height: 0.85, color: body },         // chassis
     { polygon: partRect(d, L, W, -0.06, 0.56, 0.86), height: 1.24, color: GLASS },       // greenhouse / windshield
     { polygon: partRect(d, L, W, -0.08, 0.48, 0.76), height: 1.44, color: roof },        // roof
     { polygon: partRect(d, L, W, 0.47, 0.05, 0.84), height: 0.62, color: HEADLIGHT },    // headlights
     { polygon: partRect(d, L, W, -0.48, 0.045, 0.84), height: 0.64, color: TAILLIGHT },  // taillights
+  ];
+}
+
+// LOD: with thousands of vehicles (or zoomed far out) the small parts are
+// sub-pixel — draw shadow + one body box per vehicle instead of 8 parts.
+const LOD_MAX_DETAILED = 1500, LOD_MIN_ZOOM = 14.5;
+function vehicleLod(d) {
+  const L = d.len || (isBus(d) ? 12 : 4.5);
+  const W = d.wid || (isBus(d) ? 2.55 : 1.8);
+  return [
+    { polygon: partRect(d, L * 1.08, W * 1.25, 0, 1, 1), height: 0.03, color: SHADOW },
+    { polygon: partRect(d, L, W, 0, 1, 1), height: isBus(d) ? 2.8 : 1.4, color: vehicleColor(d) },
   ];
 }
 
@@ -125,6 +149,7 @@ const LIGHT_PRESETS = {
            "sky-horizon-blend": 0.7, "horizon-fog-blend": 0.5, "fog-ground-blend": 0.4, "atmosphere-blend": 0.8 },
     skyCss: "linear-gradient(to bottom, #6d86c0 0%, #a9a6c4 55%, #f5c9a8 100%)",
     light: { color: "#ffe6c7", intensity: 0.4, position: [1.4, 90, 18] },
+    ambient: 0.55, sunColor: [255, 214, 170], sunIntensity: 1.3, sunDir: [-1, 0.1, -0.35],
     buildings: [0, "#cbc7c1", 12, "#c3beb4", 25, "#b6b0a4", 45, "#a49d90", 80, "#8f8778"],
     asphalt: [66, 70, 80], tint: "linear-gradient(to top, rgba(255,180,120,.18), rgba(120,130,175,.12))", blend: "soft-light",
   },
@@ -133,6 +158,7 @@ const LIGHT_PRESETS = {
            "sky-horizon-blend": 0.8, "horizon-fog-blend": 0.4, "fog-ground-blend": 0.3, "atmosphere-blend": 0.6 },
     skyCss: "linear-gradient(to bottom, #7fb0ea 0%, #a8c9ef 60%, #dfeaf5 100%)",
     light: { color: "#ffffff", intensity: 0.4, position: [1.2, 210, 30] },
+    ambient: 0.65, sunColor: [255, 255, 250], sunIntensity: 1.7, sunDir: [-0.3, -0.5, -1],
     buildings: [0, "#f1e5db", 25, "#ece0d2", 60, "#e3d7c8", 90, "#d8ccbc"],
     asphalt: [179, 187, 211], tint: "transparent", blend: "normal",
   },
@@ -141,6 +167,7 @@ const LIGHT_PRESETS = {
            "sky-horizon-blend": 0.55, "horizon-fog-blend": 0.6, "fog-ground-blend": 0.5, "atmosphere-blend": 0.95 },
     skyCss: "linear-gradient(to bottom, #241a3a 0%, #5a2f63 45%, #ff8a4c 100%)",
     light: { color: "#ff9d5c", intensity: 0.5, position: [1.5, 250, 12] },
+    ambient: 0.45, sunColor: [255, 150, 90], sunIntensity: 1.4, sunDir: [1, 0.25, -0.28],
     buildings: [0, "#c08a5f", 20, "#8f6f6a", 45, "#5f4f5e", 80, "#3f3550"],
     asphalt: [48, 42, 56], tint: "linear-gradient(to top, rgba(255,120,50,.30), rgba(42,26,64,.42))", blend: "multiply",
   },
@@ -149,15 +176,28 @@ const LIGHT_PRESETS = {
            "sky-horizon-blend": 0.5, "horizon-fog-blend": 0.6, "fog-ground-blend": 0.6, "atmosphere-blend": 1.0 },
     skyCss: "linear-gradient(to bottom, #050a1c 0%, #101836 55%, #26335c 100%)",
     light: { color: "#9fb4ff", intensity: 0.25, position: [1.5, 200, 60] },
+    ambient: 0.35, sunColor: [150, 170, 255], sunIntensity: 0.55, sunDir: [0.3, -0.4, -1],
     buildings: [0, "#3c4157", 20, "#31374c", 45, "#282c41", 80, "#202338"],
     asphalt: [30, 32, 45], tint: "linear-gradient(to top, rgba(14,20,46,.55), rgba(8,12,30,.70))", blend: "multiply",
   },
 };
 
+// deck.gl scene lighting synced with the preset: ambient + directional "sun".
+// Shades the extruded vehicles (and any 3D deck geometry) so faces facing the
+// sun are lit and the others fall into shadow — the core of the realism boost.
+function makeLighting(name) {
+  const p = LIGHT_PRESETS[name];
+  return new deck.LightingEffect({
+    ambient: new deck.AmbientLight({ color: [255, 255, 255], intensity: p.ambient }),
+    sun: new deck.DirectionalLight({ color: p.sunColor, intensity: p.sunIntensity, direction: p.sunDir }),
+  });
+}
+
 function applyLightPreset(name) {
   const p = LIGHT_PRESETS[name];
   if (!p || !map) return;
   currentPreset = name;
+  if (overlay) overlay.setProps({ effects: [makeLighting(name)] });
   try { map.setSky(p.sky); } catch (e) { /* older MapLibre: CSS sky below still applies */ }
   try { map.setLight(p.light); } catch (e) {}
   const mapEl = document.getElementById("map");
@@ -402,11 +442,15 @@ function busyColor(n) {
   return [235, Math.round(150 - 110 * t), 40];
 }
 
+const roadW = (f) => 3.2 * (f.properties.lanes || 1);          // real carriageway width
+// Static layers are created ONCE and reused across frames — recreating them per
+// frame made deck.gl re-diff the 34k-edge geometries at every simulation step.
+let _casingLayer = null, _laneLayer = null;
+
 function buildLayers() {
-  const roadW = (f) => 3.2 * (f.properties.lanes || 1);        // real carriageway width
-  const layers = [
+  if (!_casingLayer) {
     // dark casing under the roads -> crisp, defined edges (surface colour unchanged)
-    new deck.GeoJsonLayer({
+    _casingLayer = new deck.GeoJsonLayer({
       id: "network-casing",
       data: networkGeo,
       beforeId: labelLayerId,
@@ -416,8 +460,24 @@ function buildLayers() {
       getLineColor: [64, 70, 86],
       lineCapRounded: true, lineJointRounded: true,
       pickable: false,
-    }),
-    // road surface — same colour as before (LOS when congested, else asphalt)
+    });
+    // lane divider: thin centre line on carriageways with 2+ lanes
+    _laneLayer = new deck.GeoJsonLayer({
+      id: "lane-lines",
+      data: laneLinesGeo,
+      beforeId: labelLayerId,
+      lineWidthUnits: "meters",
+      getLineWidth: 0.3,
+      lineWidthMinPixels: 0.8,
+      lineWidthMaxPixels: 2,
+      getLineColor: [242, 242, 236],
+      pickable: false,
+    });
+  }
+  const layers = [
+    _casingLayer,
+    // road surface — LOS colour when congested, else asphalt. losStamp (throttled)
+    // is the trigger, so the 34k-edge recolour runs ~1.4x/s instead of every frame.
     new deck.GeoJsonLayer({
       id: "network",
       data: networkGeo,
@@ -428,42 +488,36 @@ function buildLayers() {
       getLineColor: (f) =>
         (showCongestion && edgeColors[f.properties.id]) || asphaltColor,
       lineCapRounded: true, lineJointRounded: true,
-      updateTriggers: { getLineColor: [edgeColors, showCongestion, asphaltColor] },
+      updateTriggers: { getLineColor: [losStamp, showCongestion, asphaltColor] },
       pickable: false,
     }),
-    // lane divider: thin centre line on carriageways with 2+ lanes (to identify them)
-    new deck.GeoJsonLayer({
-      id: "lane-lines",
-      data: laneLinesGeo,
-      beforeId: labelLayerId,
-      lineWidthUnits: "meters",
-      getLineWidth: 0.3,
-      lineWidthMinPixels: 0.8,
-      lineWidthMaxPixels: 2,
-      getLineColor: [242, 242, 236],
-      pickable: false,
-    }),
+    _laneLayer,
   ];
 
   // traffic lights, coloured live from SUMO. Open junctions get a mast-arm
   // ("ménsula") with the head hanging over the road; tight ones a straight pole.
   if (showTL && tlDefs.features.length) {
-    // poles: mast-arm ("ménsula") over the road, or a straight roadside pole
-    layers.push(new deck.ColumnLayer({
-      id: "tl-pole-mast", data: tlMast, diskResolution: 6, radius: 0.14, extruded: true,
-      getPosition: poleBase, getFillColor: [30, 33, 40], getElevation: ARM_HEIGHT,
-      parameters: TL_ON_TOP,
-    }));
-    layers.push(new deck.PathLayer({
-      id: "tl-arm", data: tlMast, getPath: signalArm, getColor: [30, 33, 40],
-      getWidth: 0.22, widthUnits: "meters", widthMinPixels: 2, capRounded: true, jointRounded: true,
-      parameters: TL_ON_TOP,
-    }));
-    layers.push(new deck.ColumnLayer({
-      id: "tl-pole-straight", data: tlStraight, diskResolution: 6, radius: 0.14, extruded: true,
-      getPosition: poleBase, getFillColor: [30, 33, 40], getElevation: STRAIGHT_H,
-      parameters: TL_ON_TOP,
-    }));
+    // poles & arms are static — build once, reuse every frame
+    if (!buildLayers._tlStatic) {
+      buildLayers._tlStatic = [
+        new deck.ColumnLayer({
+          id: "tl-pole-mast", data: tlMast, diskResolution: 6, radius: 0.14, extruded: true,
+          getPosition: poleBase, getFillColor: [30, 33, 40], getElevation: ARM_HEIGHT,
+          parameters: TL_ON_TOP,
+        }),
+        new deck.PathLayer({
+          id: "tl-arm", data: tlMast, getPath: signalArm, getColor: [30, 33, 40],
+          getWidth: 0.22, widthUnits: "meters", widthMinPixels: 2, capRounded: true, jointRounded: true,
+          parameters: TL_ON_TOP,
+        }),
+        new deck.ColumnLayer({
+          id: "tl-pole-straight", data: tlStraight, diskResolution: 6, radius: 0.14, extruded: true,
+          getPosition: poleBase, getFillColor: [30, 33, 40], getElevation: STRAIGHT_H,
+          parameters: TL_ON_TOP,
+        }),
+      ];
+    }
+    layers.push(...buildLayers._tlStatic);
     // signal heads: a dark housing + a lit lens coloured live from SUMO's phase.
     // Rendered as geometry (not IconLayer) so they show reliably like the poles.
     layers.push(new deck.ScatterplotLayer({
@@ -481,19 +535,21 @@ function buildLayers() {
     }));
   }
 
-  // procedural 3D vehicles: several extruded parts per vehicle (chassis,
-  // greenhouse/windshield, roof, head/tail lights) at real size — 100% offline.
+  // procedural 3D vehicles (shadow, chassis, wheels, windshield, roof, lights),
+  // with LOD: simple boxes when there are thousands of vehicles or zoomed out.
+  const detailed = vehicles.length <= LOD_MAX_DETAILED
+    && (!map || map.getZoom() >= LOD_MIN_ZOOM);
   layers.push(new deck.PolygonLayer({
     id: "vehicles",
-    data: vehicles.flatMap(vehicleParts),
+    data: vehicles.flatMap(detailed ? vehicleParts : vehicleLod),
     extruded: true,
     getPolygon: (p) => p.polygon,
     getElevation: (p) => p.height,
     getFillColor: (p) => p.color,
-    material: { ambient: 0.5, diffuse: 0.7, shininess: 20 },
+    material: { ambient: 0.42, diffuse: 0.78, shininess: 90, specularColor: [90, 95, 105] },
     stroked: false,
     pickable: false,
-    updateTriggers: { getPolygon: vehicles, getElevation: vehicles, getFillColor: vehicles },
+    updateTriggers: { getPolygon: [vehicles, detailed], getElevation: [vehicles, detailed], getFillColor: [vehicles, detailed] },
   }));
 
   // busy streets: a beacon marker on every street whose current vehicle count
@@ -591,8 +647,12 @@ function connect() {
     const msg = JSON.parse(ev.data);
     if (msg.type === "frame") {
       vehicles = msg.vehicles;
-      edgeColors = {}; edgeCounts = {};
-      for (const e of msg.edges) { edgeColors[e.id] = hexToRgb(e.color); edgeCounts[e.id] = e.n; }
+      const now = performance.now();
+      if (now - lastLosMs >= LOS_UPDATE_MS) {      // throttled LOS/count snapshot
+        edgeColors = {}; edgeCounts = {};
+        for (const e of msg.edges) { edgeColors[e.id] = hexToRgb(e.color); edgeCounts[e.id] = e.n; }
+        losStamp++; lastLosMs = now;
+      }
       tlState = msg.tls || {};
       els.vehCount.textContent = vehicles.length;
       els.simTime.textContent = msg.t;
