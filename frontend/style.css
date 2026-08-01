@@ -55,6 +55,16 @@ input[type=range] { flex: 1; accent-color: var(--accent); }
 .pt-read { font-size: 11px; font-weight: 500; color: #fff; pointer-events: none;
   text-shadow: 0 1px 3px rgba(0,0,0,.75), 0 0 2px rgba(0,0,0,.6); }
 
+/* right-click inspector popup (SUMO stats for the picked object) */
+#popup {
+  position: absolute; display: none; z-index: 8; min-width: 190px; max-width: 270px;
+  padding: 10px 12px; border-radius: 10px; font-size: 12px; line-height: 1.55;
+  background: var(--panel); color: var(--fg); box-shadow: 0 6px 24px #000a;
+  backdrop-filter: blur(6px); pointer-events: none;
+}
+#popup h3 { margin: 0 0 6px; font-size: 12.5px; color: var(--accent); }
+#popup b { color: #fff; }
+
 #stats { margin-top: 12px; font-size: 13px; line-height: 1.7; border-top: 1px solid #2c3644; padding-top: 10px; }
 #veh-count, #sim-time { color: var(--accent); }
 #conn { font-size: 11px; margin-top: 4px; }

@@ -41,6 +41,7 @@ let networkGeo = { type: "FeatureCollection", features: [] };
 let laneLinesGeo = { type: "FeatureCollection", features: [] };  // edges with 2+ lanes
 let edgeColors = {};      // edgeId -> [r,g,b]
 let edgeCounts = {};      // edgeId -> vehicle count (n) in the latest frame
+let edgeStats = {};       // edgeId -> full live stats {n, occ, speed, density, los}
 let edgeMid = {};         // edgeId -> [lon,lat] midpoint (for the busy-street icons)
 let losStamp = 0;         // bumped when a new LOS snapshot is accepted (throttled)
 let lastLosMs = 0;
@@ -432,6 +433,7 @@ async function boot() {
 
     applyLightPreset(currentPreset);   // default light preset (día)
     syncPad();                         // place the Pan-Tilt knob at the initial camera
+    setupInspector();                  // right-click SUMO stats on vehicles/roads/signals
     connect();
   });
 }
@@ -489,7 +491,7 @@ function buildLayers() {
         (showCongestion && edgeColors[f.properties.id]) || asphaltColor,
       lineCapRounded: true, lineJointRounded: true,
       updateTriggers: { getLineColor: [losStamp, showCongestion, asphaltColor] },
-      pickable: false,
+      pickable: true,                              // right-click inspector
     }),
     _laneLayer,
   ];
@@ -531,6 +533,7 @@ function buildLayers() {
       getPosition: headPosition, getFillColor: tlColorFor,
       getRadius: 1.25, radiusUnits: "meters", radiusMinPixels: 3.5, radiusMaxPixels: 13,
       parameters: TL_ON_TOP,
+      pickable: true,                              // right-click inspector
       updateTriggers: { getFillColor: [tlState] },
     }));
   }
@@ -539,16 +542,18 @@ function buildLayers() {
   // with LOD: simple boxes when there are thousands of vehicles or zoomed out.
   const detailed = vehicles.length <= LOD_MAX_DETAILED
     && (!map || map.getZoom() >= LOD_MIN_ZOOM);
+  const mkParts = detailed ? vehicleParts : vehicleLod;
   layers.push(new deck.PolygonLayer({
     id: "vehicles",
-    data: vehicles.flatMap(detailed ? vehicleParts : vehicleLod),
+    // each part keeps a ref to its vehicle so right-click picking can inspect it
+    data: vehicles.flatMap((d) => mkParts(d).map((p) => (p.veh = d, p))),
     extruded: true,
     getPolygon: (p) => p.polygon,
     getElevation: (p) => p.height,
     getFillColor: (p) => p.color,
     material: { ambient: 0.42, diffuse: 0.78, shininess: 90, specularColor: [90, 95, 105] },
     stroked: false,
-    pickable: false,
+    pickable: true,
     updateTriggers: { getPolygon: [vehicles, detailed], getElevation: [vehicles, detailed], getFillColor: [vehicles, detailed] },
   }));
 
@@ -628,6 +633,69 @@ function refreshLayers() {
   if (overlay) overlay.setProps({ layers: buildLayers() });
 }
 
+// --- right-click inspector: live SUMO stats for the picked object ------------
+const TL_CODE = { G: "verde (prioridad)", g: "verde", y: "ámbar", Y: "ámbar",
+                  u: "rojo-ámbar", r: "rojo", s: "rojo (stop)", o: "apagado" };
+function inspectorHtml(info) {
+  const o = info.object;
+  if (info.layer.id === "vehicles" && o.veh) {
+    const d = o.veh;
+    return `<h3>Vehículo ${d.id}</h3>` +
+      `Tipo: <b>${d.type}</b><br>` +
+      `Velocidad: <b>${Math.round(d.speed * 3.6)} km/h</b> · Rumbo: <b>${Math.round(d.angle)}°</b><br>` +
+      `Dimensiones: <b>${d.len} × ${d.wid} m</b><br>` +
+      `Calle (edge): <b>${d.edge}</b>`;
+  }
+  if (info.layer.id === "network") {
+    const p = o.properties, s = edgeStats[p.id];
+    let html = `<h3>Calle ${p.id}</h3>` +
+      `Carriles: <b>${p.lanes}</b> · Longitud: <b>${p.length} m</b><br>` +
+      `Vel. máxima: <b>${Math.round(p.speed * 3.6)} km/h</b>`;
+    if (s) {
+      html += `<br>Vehículos ahora: <b>${s.n}</b> · LOS: <b>${s.los}</b><br>` +
+        `Densidad: <b>${s.density} veh/km/carril</b><br>` +
+        `Vel. media: <b>${Math.round(s.speed * 3.6)} km/h</b> · Ocupación: <b>${Math.round(s.occ * 100)}%</b>`;
+    } else {
+      html += `<br>Sin tráfico en este momento (flujo libre)`;
+    }
+    return html;
+  }
+  if (info.layer.id === "tl-head" || info.layer.id === "tl-housing") {
+    const p = o.properties;
+    const st = tlState[p.tls];
+    const ch = st ? st[p.index] : "o";
+    return `<h3>Semáforo</h3>` +
+      `Intersección: <b>${p.tls}</b><br>` +
+      `Estado: <b>${TL_CODE[ch] || ch}</b><br>` +
+      `Tipo: <b>${p.mast ? "ménsula" : "poste"}</b> · Acceso: <b>${Math.round(p.angle)}°</b>`;
+  }
+  if (info.layer.id === "busy-head") {
+    return `<h3>Calle concurrida</h3>Vehículos ahora: <b>${o.count}</b>`;
+  }
+  return null;
+}
+
+function setupInspector() {
+  const popup = document.getElementById("popup");
+  const container = map.getCanvasContainer();
+  container.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    if (!overlay) return;
+    const rect = map.getCanvas().getBoundingClientRect();
+    const info = overlay.pickObject({
+      x: e.clientX - rect.left, y: e.clientY - rect.top, radius: 8,
+    });
+    const html = info && info.object ? inspectorHtml(info) : null;
+    if (!html) { popup.style.display = "none"; return; }
+    popup.innerHTML = html;
+    popup.style.display = "block";
+    popup.style.left = Math.min(e.clientX + 12, window.innerWidth - 290) + "px";
+    popup.style.top = Math.min(e.clientY + 12, window.innerHeight - 190) + "px";
+  });
+  map.on("click", () => { popup.style.display = "none"; });   // click elsewhere closes it
+  map.on("dragstart", () => { popup.style.display = "none"; });
+}
+
 // --- WebSocket live stream --------------------------------------------------
 // Each connection is tracked by identity (sock === ws). When we switch scenario
 // or reset, the previous socket is superseded, so its late frames and its close
@@ -649,8 +717,10 @@ function connect() {
       vehicles = msg.vehicles;
       const now = performance.now();
       if (now - lastLosMs >= LOS_UPDATE_MS) {      // throttled LOS/count snapshot
-        edgeColors = {}; edgeCounts = {};
-        for (const e of msg.edges) { edgeColors[e.id] = hexToRgb(e.color); edgeCounts[e.id] = e.n; }
+        edgeColors = {}; edgeCounts = {}; edgeStats = {};
+        for (const e of msg.edges) {
+          edgeColors[e.id] = hexToRgb(e.color); edgeCounts[e.id] = e.n; edgeStats[e.id] = e;
+        }
         losStamp++; lastLosMs = now;
       }
       tlState = msg.tls || {};
