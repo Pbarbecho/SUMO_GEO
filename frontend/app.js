@@ -19,6 +19,10 @@ const els = {
   congestion: document.getElementById("toggle-congestion"),
   tl: document.getElementById("toggle-tl"),
   model3d: document.getElementById("toggle-3d"),
+  poi: document.getElementById("toggle-poi"),
+  busy: document.getElementById("toggle-busy"),
+  busyMin: document.getElementById("busy-min"),
+  busyVal: document.getElementById("busy-val"),
   orbit: document.getElementById("orbit"),
   viewTop: document.getElementById("view-top"),
   zoomIn: document.getElementById("zoom-in"),
@@ -35,7 +39,10 @@ const els = {
 
 let map, overlay, ws;
 let networkGeo = { type: "FeatureCollection", features: [] };
+let laneLinesGeo = { type: "FeatureCollection", features: [] };  // edges with 2+ lanes
 let edgeColors = {};      // edgeId -> [r,g,b]
+let edgeCounts = {};      // edgeId -> vehicle count (n) in the latest frame
+let edgeMid = {};         // edgeId -> [lon,lat] midpoint (for the busy-street icons)
 let vehicles = [];        // latest frame vehicles
 let tlDefs = { type: "FeatureCollection", features: [] };  // static signal positions
 let tlState = {};         // tlsID -> live state string ("GrGr...")
@@ -43,6 +50,8 @@ let paused = false;
 let showCongestion = true;
 let showTL = true;
 let show3D = false;         // false = reliable 3D boxes (default); true = glTF models (experimental)
+let showBusy = false;       // icon markers on streets with >= busyMin vehicles
+let busyMin = 2;            // busy-street threshold (from the selector)
 let currentLevel = "mid";   // scenario level (low/mid/high) from the mapa/ files
 let currentPreset = "day";  // light preset (dawn/day/dusk/night) — default day
 let asphaltColor = [58, 62, 70];  // free-flow road colour, set per light preset
@@ -66,17 +75,47 @@ function isBus(d) { return /bus|coach|tram/i.test(d.type || ""); }
 function vehicleColor(d) {
   return isBus(d) ? BUS_COLOR : CAR_COLORS[hashId(d.id) % CAR_COLORS.length];
 }
-function vehicleElevation(d) { return isBus(d) ? 3.2 : 1.5; }
-// oriented ground rectangle from centre + SUMO heading (0=N, clockwise) + size
-function vehiclePolygon(d) {
-  const L = d.len || (isBus(d) ? 12 : 4.5);
-  const W = d.wid || (isBus(d) ? 2.55 : 1.8);
+function darken(c, f) { return [Math.round(c[0] * f), Math.round(c[1] * f), Math.round(c[2] * f)]; }
+const GLASS = [32, 38, 50];        // windshield / windows
+const HEADLIGHT = [255, 240, 205];
+const TAILLIGHT = [214, 42, 38];
+
+// A rectangle part, oriented by SUMO heading, centred `alongFrac`·L forward from
+// the vehicle centre, sized `lenFrac`·L × `widFrac`·W. (0=N, clockwise.)
+function partRect(d, L, W, alongFrac, lenFrac, widFrac) {
   const h = d.angle || 0;
+  const [cx, cy] = offsetLonLat(d.lon, d.lat, h, alongFrac * L);
+  const hl = (lenFrac * L) / 2, hw = (widFrac * W) / 2;
   const corner = (sl, sw) => {
-    const [lo, la] = offsetLonLat(d.lon, d.lat, h, (sl * L) / 2);
-    return offsetLonLat(lo, la, (h + 90) % 360, (sw * W) / 2);
+    const [x, y] = offsetLonLat(cx, cy, h, sl * hl);
+    return offsetLonLat(x, y, (h + 90) % 360, sw * hw);
   };
   return [corner(1, -1), corner(1, 1), corner(-1, 1), corner(-1, -1)];
+}
+
+// Procedural 3D vehicle: several extruded parts (chassis, greenhouse/windshield,
+// roof, head/tail lights) at real size — 100% offline, perfect orientation.
+function vehicleParts(d) {
+  const L = d.len || (isBus(d) ? 12 : 4.5);
+  const W = d.wid || (isBus(d) ? 2.55 : 1.8);
+  const body = vehicleColor(d);
+  const roof = darken(body, 0.82);
+  if (isBus(d)) {
+    return [
+      { polygon: partRect(d, L, W, 0.00, 1.00, 1.00), height: 2.6, color: body },       // chassis
+      { polygon: partRect(d, L, W, 0.00, 0.96, 0.90), height: 2.8, color: roof },        // roof cap
+      { polygon: partRect(d, L, W, 0.46, 0.06, 0.90), height: 2.2, color: GLASS },       // windshield
+      { polygon: partRect(d, L, W, 0.49, 0.02, 0.94), height: 1.0, color: HEADLIGHT },   // headlights
+      { polygon: partRect(d, L, W, -0.49, 0.02, 0.94), height: 1.0, color: TAILLIGHT },  // taillights
+    ];
+  }
+  return [
+    { polygon: partRect(d, L, W, 0.00, 1.00, 1.00), height: 0.85, color: body },         // chassis
+    { polygon: partRect(d, L, W, -0.06, 0.56, 0.86), height: 1.24, color: GLASS },       // greenhouse / windshield
+    { polygon: partRect(d, L, W, -0.08, 0.48, 0.76), height: 1.44, color: roof },        // roof
+    { polygon: partRect(d, L, W, 0.47, 0.05, 0.84), height: 0.62, color: HEADLIGHT },    // headlights
+    { polygon: partRect(d, L, W, -0.48, 0.045, 0.84), height: 0.64, color: TAILLIGHT },  // taillights
+  ];
 }
 
 // 3D glTF model (deck.gl-data low-poly truck). The <script> deck.gl bundle
@@ -170,6 +209,17 @@ function applyBasemapColors() {
         else if (/road|street|highway|motorway|trunk|primary|secondary|tertiary|residential|service|transport|bridge|tunnel|path|track|rail|aeroway/.test(id)) map.setPaintProperty(l.id, "line-color", C.road);
       }
     } catch (e) { /* layer without that paint prop */ }
+  }
+}
+
+// Show/hide the basemap POI symbols (shops, restaurants, banks, parking, bus &
+// rail stops…) — all live in the "poi" source-layer. Street and place names stay.
+function setPoiVisible(show) {
+  if (!map) return;
+  for (const l of map.getStyle().layers) {
+    if (l.type === "symbol" && l["source-layer"] === "poi") {
+      try { map.setLayoutProperty(l.id, "visibility", show ? "visible" : "none"); } catch (e) {}
+    }
   }
 }
 
@@ -303,6 +353,7 @@ async function boot() {
     } catch (e) { /* style without light support */ }
 
     applyBasemapColors();   // exact Mapbox Standard "day" palette (land/green/road/water)
+    setPoiVisible(els.poi.checked);   // hide shop/bus-stop POI clutter by default
 
     // --- extruded building polygons (native MapLibre fill-extrusion) --------
     const buildings = await fetchJSON("/api/buildings");
@@ -326,6 +377,13 @@ async function boot() {
 
     // --- road network (deck.gl overlay, recoloured by congestion) ----------
     networkGeo = await fetchJSON("/api/network");
+    laneLinesGeo = { type: "FeatureCollection",
+      features: networkGeo.features.filter((f) => (f.properties.lanes || 1) >= 2) };
+    edgeMid = {};
+    for (const f of networkGeo.features) {
+      const c = f.geometry.coordinates;
+      edgeMid[f.properties.id] = c[Math.floor(c.length / 2)];
+    }
     tlDefs = await fetchJSON("/api/trafficlights");
     splitTrafficLights();
     overlay = new deck.MapboxOverlay({ interleaved: true, layers: buildLayers() });
@@ -337,18 +395,51 @@ async function boot() {
   });
 }
 
+// busy-street marker colour: amber -> red as the vehicle count grows
+function busyColor(n) {
+  const t = Math.max(0, Math.min(1, (n - busyMin) / 15));
+  return [235, Math.round(150 - 110 * t), 40];
+}
+
 function buildLayers() {
+  const roadW = (f) => 3.2 * (f.properties.lanes || 1);        // real carriageway width
   const layers = [
+    // dark casing under the roads -> crisp, defined edges (surface colour unchanged)
+    new deck.GeoJsonLayer({
+      id: "network-casing",
+      data: networkGeo,
+      beforeId: labelLayerId,
+      lineWidthUnits: "meters",
+      getLineWidth: (f) => roadW(f) + 0.3,
+      lineWidthMinPixels: 2.5,
+      getLineColor: [64, 70, 86],
+      lineCapRounded: true, lineJointRounded: true,
+      pickable: false,
+    }),
+    // road surface — same colour as before (LOS when congested, else asphalt)
     new deck.GeoJsonLayer({
       id: "network",
       data: networkGeo,
-      beforeId: labelLayerId,                                   // roads under the labels
+      beforeId: labelLayerId,
       lineWidthUnits: "meters",
-      getLineWidth: (f) => 3.2 * (f.properties.lanes || 1),     // real carriageway width
+      getLineWidth: roadW,
       lineWidthMinPixels: 1.5,
       getLineColor: (f) =>
         (showCongestion && edgeColors[f.properties.id]) || asphaltColor,
+      lineCapRounded: true, lineJointRounded: true,
       updateTriggers: { getLineColor: [edgeColors, showCongestion, asphaltColor] },
+      pickable: false,
+    }),
+    // lane divider: thin centre line on carriageways with 2+ lanes (to identify them)
+    new deck.GeoJsonLayer({
+      id: "lane-lines",
+      data: laneLinesGeo,
+      beforeId: labelLayerId,
+      lineWidthUnits: "meters",
+      getLineWidth: 0.3,
+      lineWidthMinPixels: 0.8,
+      lineWidthMaxPixels: 2,
+      getLineColor: [242, 242, 236],
       pickable: false,
     }),
   ];
@@ -409,22 +500,45 @@ function buildLayers() {
       updateTriggers: { getColor: vehicles, getScale: vehicles },
     }));
   } else {
-    // reliable coloured markers — same layer type as the working signal heads;
-    // radiusMinPixels guarantees they're visible at any zoom (buses bigger)
-    layers.push(new deck.ScatterplotLayer({
+    // procedural 3D vehicles: several extruded parts per vehicle (chassis,
+    // greenhouse/windshield, roof, head/tail lights) at real size — offline.
+    layers.push(new deck.PolygonLayer({
       id: "vehicles",
-      data: vehicles,
-      getPosition: (d) => [d.lon, d.lat],
-      getFillColor: vehicleColor,
-      getRadius: (d) => (isBus(d) ? 4.2 : 2.6),
-      radiusUnits: "meters",
-      radiusMinPixels: 3,
-      radiusMaxPixels: 16,
-      stroked: true,
-      getLineColor: [15, 17, 22],
-      lineWidthMinPixels: 0.8,
+      data: vehicles.flatMap(vehicleParts),
+      extruded: true,
+      getPolygon: (p) => p.polygon,
+      getElevation: (p) => p.height,
+      getFillColor: (p) => p.color,
+      material: { ambient: 0.5, diffuse: 0.7, shininess: 20 },
+      stroked: false,
+      pickable: false,
+      updateTriggers: { getPolygon: vehicles, getElevation: vehicles, getFillColor: vehicles },
+    }));
+  }
+
+  // busy streets: an IconLayer pin (deck.gl icon-layer style) on every street
+  // whose current vehicle count reaches the selector threshold (busyMin)
+  if (showBusy) {
+    const pts = [];
+    for (const id in edgeCounts) {
+      if (edgeCounts[id] >= busyMin && edgeMid[id]) {
+        pts.push({ position: edgeMid[id], count: edgeCounts[id] });
+      }
+    }
+    layers.push(new deck.IconLayer({
+      id: "busy-streets",
+      data: pts,
+      iconAtlas: "marker.png",
+      iconMapping: { marker: { x: 0, y: 0, width: 128, height: 128, anchorY: 128, mask: true } },
+      getIcon: () => "marker",
+      getPosition: (d) => d.position,
+      getSize: (d) => 28 + Math.min(d.count, 20) * 1.6,
+      sizeUnits: "pixels",
+      getColor: (d) => busyColor(d.count),
+      billboard: true,
+      parameters: { depthTest: false },
       pickable: true,
-      updateTriggers: { getFillColor: vehicles, getRadius: vehicles },
+      updateTriggers: { getSize: busyMin, getColor: busyMin },
     }));
   }
 
@@ -454,8 +568,8 @@ function connect() {
     const msg = JSON.parse(ev.data);
     if (msg.type === "frame") {
       vehicles = msg.vehicles;
-      edgeColors = {};
-      for (const e of msg.edges) edgeColors[e.id] = hexToRgb(e.color);
+      edgeColors = {}; edgeCounts = {};
+      for (const e of msg.edges) { edgeColors[e.id] = hexToRgb(e.color); edgeCounts[e.id] = e.n; }
       tlState = msg.tls || {};
       els.vehCount.textContent = vehicles.length;
       els.simTime.textContent = msg.t;
@@ -502,6 +616,9 @@ els.buildings.onchange = () => {
 els.congestion.onchange = () => { showCongestion = els.congestion.checked; refreshLayers(); };
 els.tl.onchange = () => { showTL = els.tl.checked; refreshLayers(); };
 els.model3d.onchange = () => { show3D = els.model3d.checked; refreshLayers(); };
+els.poi.onchange = () => setPoiVisible(els.poi.checked);
+els.busy.onchange = () => { showBusy = els.busy.checked; refreshLayers(); };
+els.busyMin.oninput = () => { busyMin = Number(els.busyMin.value); els.busyVal.textContent = busyMin; refreshLayers(); };
 
 // --- unified Pan-Tilt pad: X = bearing (pan), Y = pitch (tilt) --------------
 const PITCH_MAX = 85;
