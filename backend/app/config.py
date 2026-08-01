@@ -5,6 +5,19 @@ All settings can be overridden with environment variables prefixed with ``APP_``
 """
 from __future__ import annotations
 
+import os
+
+# Point PROJ at pyproj's bundled CRS database so SUMO/sumolib stop warning
+# "pj_obj_create: Cannot find proj.db" when converting UTM <-> lon/lat. Harmless
+# either way, but this silences the log noise. Must run before the net is loaded.
+try:
+    import pyproj
+    _proj_dir = pyproj.datadir.get_data_dir()
+    os.environ.setdefault("PROJ_DATA", _proj_dir)
+    os.environ.setdefault("PROJ_LIB", _proj_dir)
+except Exception:
+    pass
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -41,6 +54,12 @@ class Settings(BaseSettings):
     # Networks that carry a real projection (OSM imports) are converted with it.
     origin_lon: float = -79.0045               # Cuenca, Ecuador (demo anchor)
     origin_lat: float = -2.9006
+
+    # Optional map view centre [lon, lat]. When set, the app opens here instead of
+    # the network's geometric centre — handy when demand is concentrated in one
+    # area (e.g. only the city centre of a large metropolitan network).
+    view_lon: float | None = None
+    view_lat: float | None = None
 
     # --- Streaming -----------------------------------------------------------
     max_fps: float = 10.0                       # WebSocket frame-rate cap

@@ -23,6 +23,7 @@ class SumoBridge:
         self.label = None
         self.running = False
         self._libsumo = False
+        self._dims: dict = {}     # typeID -> (length, width) metres, cached
 
     def _import_client(self):
         if settings.use_libsumo:
@@ -67,19 +68,36 @@ class SumoBridge:
         self.conn.simulationStep()
         return self.conn.simulation.getTime()
 
+    def _type_dims(self, type_id: str) -> tuple[float, float]:
+        """(length, width) in metres for a vType, queried once and cached so the
+        frontend can draw each vehicle at its true footprint (car vs. bus)."""
+        d = self._dims.get(type_id)
+        if d is None:
+            try:
+                d = (round(self.conn.vehicletype.getLength(type_id), 2),
+                     round(self.conn.vehicletype.getWidth(type_id), 2))
+            except Exception:
+                d = (4.5, 1.8)          # sensible passenger-car fallback
+            self._dims[type_id] = d
+        return d
+
     def vehicles(self, netgeo) -> list[dict]:
         conn = self.conn
         out = []
         for vid in conn.vehicle.getIDList():
             x, y = conn.vehicle.getPosition(vid)
             lon, lat = netgeo.xy_to_lonlat(x, y)
+            vtype = conn.vehicle.getTypeID(vid)
+            length, width = self._type_dims(vtype)
             out.append({
                 "id": vid,
                 "lon": lon,
                 "lat": lat,
                 "angle": round(conn.vehicle.getAngle(vid), 1),
                 "speed": round(conn.vehicle.getSpeed(vid), 2),
-                "type": conn.vehicle.getTypeID(vid),
+                "type": vtype,
+                "len": length,
+                "wid": width,
                 "edge": conn.vehicle.getRoadID(vid),
             })
         return out

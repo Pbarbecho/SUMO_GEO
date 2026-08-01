@@ -12,12 +12,13 @@ const els = {
   level: document.getElementById("level"),
   fps: document.getElementById("fps"),
   fpsVal: document.getElementById("fps-val"),
+  pad: document.getElementById("pantilt"),
+  padKnob: document.getElementById("pad-knob"),
+  ptRead: document.getElementById("pt-read"),
   buildings: document.getElementById("toggle-buildings"),
   congestion: document.getElementById("toggle-congestion"),
   tl: document.getElementById("toggle-tl"),
-  rotLeft: document.getElementById("rot-left"),
-  rotRight: document.getElementById("rot-right"),
-  rotNorth: document.getElementById("rot-north"),
+  model3d: document.getElementById("toggle-3d"),
   orbit: document.getElementById("orbit"),
   viewTop: document.getElementById("view-top"),
   zoomIn: document.getElementById("zoom-in"),
@@ -25,6 +26,11 @@ const els = {
   vehCount: document.getElementById("veh-count"),
   simTime: document.getElementById("sim-time"),
   conn: document.getElementById("conn"),
+  tint: document.getElementById("tint"),
+  light_dawn: document.getElementById("light-dawn"),
+  light_day: document.getElementById("light-day"),
+  light_dusk: document.getElementById("light-dusk"),
+  light_night: document.getElementById("light-night"),
 };
 
 let map, overlay, ws;
@@ -36,15 +42,135 @@ let tlState = {};         // tlsID -> live state string ("GrGr...")
 let paused = false;
 let showCongestion = true;
 let showTL = true;
+let show3D = false;         // false = reliable 3D boxes (default); true = glTF models (experimental)
 let currentLevel = "mid";   // scenario level (low/mid/high) from the mapa/ files
+let currentPreset = "day";  // light preset (dawn/day/dusk/night) — default day
+let asphaltColor = [58, 62, 70];  // free-flow road colour, set per light preset
 
-// speed (m/s) -> colour ramp (red slow → green fast)
-function speedColor(v) {
-  const t = Math.max(0, Math.min(1, v / 14));     // ~50 km/h reference
-  return [Math.round(230 * (1 - t)) + 20, Math.round(200 * t) + 40, 70];
-}
 function hexToRgb(h) {
   return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+}
+
+// --- realistic vehicles ------------------------------------------------------
+// Drawn as oriented, extruded boxes at their true footprint (car vs. bus),
+// coloured with a believable car palette; buses in transit orange. Congestion
+// is carried by the road colour (LOS), so vehicle colour stays realistic.
+let labelLayerId = null;   // first basemap symbol layer -> draw data beneath labels
+const CAR_COLORS = [
+  [236, 237, 240], [30, 33, 38], [180, 184, 190], [108, 114, 122],
+  [178, 44, 44], [40, 74, 142], [26, 40, 62], [156, 128, 74], [64, 112, 86],
+];
+const BUS_COLOR = [250, 150, 20];
+function hashId(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h; }
+function isBus(d) { return /bus|coach|tram/i.test(d.type || ""); }
+function vehicleColor(d) {
+  return isBus(d) ? BUS_COLOR : CAR_COLORS[hashId(d.id) % CAR_COLORS.length];
+}
+function vehicleElevation(d) { return isBus(d) ? 3.2 : 1.5; }
+// oriented ground rectangle from centre + SUMO heading (0=N, clockwise) + size
+function vehiclePolygon(d) {
+  const L = d.len || (isBus(d) ? 12 : 4.5);
+  const W = d.wid || (isBus(d) ? 2.55 : 1.8);
+  const h = d.angle || 0;
+  const corner = (sl, sw) => {
+    const [lo, la] = offsetLonLat(d.lon, d.lat, h, (sl * L) / 2);
+    return offsetLonLat(lo, la, (h + 90) % 360, (sw * W) / 2);
+  };
+  return [corner(1, -1), corner(1, 1), corner(-1, 1), corner(-1, -1)];
+}
+
+// 3D glTF model (deck.gl-data low-poly truck). The <script> deck.gl bundle
+// ships ScenegraphLayer but NOT the glTF loader, so index.html loads
+// @loaders.gl/gltf and we hand its GLTFLoader to the layer / register it.
+const VEHICLE_MODEL = "https://raw.githubusercontent.com/visgl/deck.gl-data/master/luma.gl/scenegraph/low_poly_truck/scene.gltf";
+const VEHICLE_SIZE = 3;   // model scale — lower if the trucks look too big, raise if too small
+const GLTF_LOADER = (window.loaders && window.loaders.GLTFLoader) || null;
+if (GLTF_LOADER && window.loaders.registerLoaders) {
+  try { window.loaders.registerLoaders([GLTF_LOADER]); } catch (e) {}
+}
+
+// --- light presets (emulate Mapbox Standard's lightPreset in MapLibre) -------
+// Each preset drives the sky/atmosphere, the 3D light, the building & asphalt
+// colours, and a full-scene tint — so the whole map reads as that time of day.
+const LIGHT_PRESETS = {
+  dawn: {
+    sky: { "sky-color": "#9ab4de", "horizon-color": "#f5c9a8", "fog-color": "#e6d4cc",
+           "sky-horizon-blend": 0.7, "horizon-fog-blend": 0.5, "fog-ground-blend": 0.4, "atmosphere-blend": 0.8 },
+    skyCss: "linear-gradient(to bottom, #6d86c0 0%, #a9a6c4 55%, #f5c9a8 100%)",
+    light: { color: "#ffe6c7", intensity: 0.4, position: [1.4, 90, 18] },
+    buildings: [0, "#cbc7c1", 12, "#c3beb4", 25, "#b6b0a4", 45, "#a49d90", 80, "#8f8778"],
+    asphalt: [66, 70, 80], tint: "linear-gradient(to top, rgba(255,180,120,.18), rgba(120,130,175,.12))", blend: "soft-light",
+  },
+  day: {
+    sky: { "sky-color": "#8fb6e8", "horizon-color": "#cfe0f2", "fog-color": "#e8eef5",
+           "sky-horizon-blend": 0.8, "horizon-fog-blend": 0.4, "fog-ground-blend": 0.3, "atmosphere-blend": 0.6 },
+    skyCss: "linear-gradient(to bottom, #7fb0ea 0%, #a8c9ef 60%, #dfeaf5 100%)",
+    light: { color: "#ffffff", intensity: 0.4, position: [1.2, 210, 30] },
+    buildings: [0, "#f1e5db", 25, "#ece0d2", 60, "#e3d7c8", 90, "#d8ccbc"],
+    asphalt: [179, 187, 211], tint: "transparent", blend: "normal",
+  },
+  dusk: {
+    sky: { "sky-color": "#38265a", "horizon-color": "#ff8a4c", "fog-color": "#d1774d",
+           "sky-horizon-blend": 0.55, "horizon-fog-blend": 0.6, "fog-ground-blend": 0.5, "atmosphere-blend": 0.95 },
+    skyCss: "linear-gradient(to bottom, #241a3a 0%, #5a2f63 45%, #ff8a4c 100%)",
+    light: { color: "#ff9d5c", intensity: 0.5, position: [1.5, 250, 12] },
+    buildings: [0, "#c08a5f", 20, "#8f6f6a", 45, "#5f4f5e", 80, "#3f3550"],
+    asphalt: [48, 42, 56], tint: "linear-gradient(to top, rgba(255,120,50,.30), rgba(42,26,64,.42))", blend: "multiply",
+  },
+  night: {
+    sky: { "sky-color": "#070c20", "horizon-color": "#26335c", "fog-color": "#16233f",
+           "sky-horizon-blend": 0.5, "horizon-fog-blend": 0.6, "fog-ground-blend": 0.6, "atmosphere-blend": 1.0 },
+    skyCss: "linear-gradient(to bottom, #050a1c 0%, #101836 55%, #26335c 100%)",
+    light: { color: "#9fb4ff", intensity: 0.25, position: [1.5, 200, 60] },
+    buildings: [0, "#3c4157", 20, "#31374c", 45, "#282c41", 80, "#202338"],
+    asphalt: [30, 32, 45], tint: "linear-gradient(to top, rgba(14,20,46,.55), rgba(8,12,30,.70))", blend: "multiply",
+  },
+};
+
+function applyLightPreset(name) {
+  const p = LIGHT_PRESETS[name];
+  if (!p || !map) return;
+  currentPreset = name;
+  try { map.setSky(p.sky); } catch (e) { /* older MapLibre: CSS sky below still applies */ }
+  try { map.setLight(p.light); } catch (e) {}
+  const mapEl = document.getElementById("map");
+  if (mapEl) mapEl.style.background = p.skyCss;
+  if (map.getLayer("buildings-3d")) {
+    map.setPaintProperty("buildings-3d", "fill-extrusion-color",
+      ["interpolate", ["linear"], ["get", "height"]].concat(p.buildings));
+  }
+  asphaltColor = p.asphalt;
+  if (els.tint) { els.tint.style.background = p.tint; els.tint.style.mixBlendMode = p.blend; }
+  refreshLayers();
+  for (const k of ["dawn", "day", "dusk", "night"]) {
+    const b = els["light_" + k];
+    if (b) b.classList.toggle("active", k === name);
+  }
+}
+
+// Re-theme the OpenFreeMap basemap to the exact Mapbox Standard "day" palette.
+const MAP_COLORS = {
+  land: "#f2edec", green: "#d1edcc", road: "#b3bbd3", water: "#aecae8", building: "#f1e5db",
+};
+function applyBasemapColors() {
+  if (!map) return;
+  const C = MAP_COLORS;
+  for (const l of map.getStyle().layers) {
+    const id = l.id.toLowerCase();
+    try {
+      if (l.type === "background") {
+        map.setPaintProperty(l.id, "background-color", C.land);
+      } else if (l.type === "fill") {
+        if (/water|river|lake|ocean|sea|pond|basin|reservoir/.test(id)) map.setPaintProperty(l.id, "fill-color", C.water);
+        else if (/park|wood|forest|grass|green|golf|pitch|garden|scrub|meadow|landcover|nature|cemetery|recreation|farm|vegetation|allotments/.test(id)) map.setPaintProperty(l.id, "fill-color", C.green);
+        else if (/build/.test(id)) map.setPaintProperty(l.id, "fill-color", C.building);
+        else map.setPaintProperty(l.id, "fill-color", C.land);
+      } else if (l.type === "line") {
+        if (/water|river|stream|canal|waterway/.test(id)) map.setPaintProperty(l.id, "line-color", C.water);
+        else if (/road|street|highway|motorway|trunk|primary|secondary|tertiary|residential|service|transport|bridge|tunnel|path|track|rail|aeroway/.test(id)) map.setPaintProperty(l.id, "line-color", C.road);
+      }
+    } catch (e) { /* layer without that paint prop */ }
+  }
 }
 
 // SUMO signal codes -> colour (G/g green, y amber, u red-amber, r/s red, o off)
@@ -101,6 +227,10 @@ function offsetLonLat(lon, lat, bearing, dist) {
   return [lon + dLon, lat + dLat];
 }
 const ARM_HEIGHT = 6.0, SIDE_DISTANCE = 3.2, STRAIGHT_H = 3.2;
+// draw signals over the buildings (skip depth occlusion) so they're always visible.
+// deck.gl's `parameters` prop uses classic WebGL keys (depthTest/depthMask), NOT
+// luma.gl's WebGPU-style depthCompare/depthWriteEnabled — those silently broke the layers.
+const TL_ON_TOP = { depthTest: false };
 function sideBearing(f) { return ((f.properties.angle || 0) + 90) % 360; }   // right side of the approach
 function poleBase(f) {
   const [lon, lat] = f.geometry.coordinates;
@@ -118,6 +248,9 @@ function signalArm(f) {        // arm: curb pole -> out over the lanes
 function signalHeadTop(f) {    // straight pole: head sits on top
   const [plon, plat] = poleBase(f);
   return [plon, plat, STRAIGHT_H];
+}
+function headPosition(f) {      // where the lit head sits: arm end (mast) vs pole top
+  return f.properties.mast ? signalPosition(f) : signalHeadTop(f);
 }
 let tlMast = [], tlStraight = [];
 function splitTrafficLights() {
@@ -149,14 +282,28 @@ async function boot() {
     center: meta.center,
     zoom: 15.5,
     pitch: 55,
+    maxPitch: 85,
     bearing: -18,
     antialias: true,
   });
   map.on("dragstart", stopOrbit);       // any manual pan/rotate cancels auto-orbit
   map.on("rotatestart", stopOrbit);
-  map.on("moveend", syncFromPitch);     // keep the 2D/3D label in sync with gestures
+  map.on("rotate", syncPad);            // keep the Pan-Tilt pad in sync with gestures/orbit
+  map.on("pitch", syncPad);
+  map.on("moveend", syncPad);
 
   map.on("load", async () => {
+    // deck.gl + Mapbox "single context" pattern (vis.gl): draw our data BENEATH
+    // the basemap's text labels so street names stay legible on top, and share
+    // the depth buffer so 3D buildings and vehicles occlude each other.
+    labelLayerId = (map.getStyle().layers.find(
+      (l) => l.type === "symbol" && l.layout && l.layout["text-field"]) || {}).id || undefined;
+    try {
+      map.setLight({ anchor: "viewport", color: "#fff", intensity: 0.35, position: [1.2, 210, 30] });
+    } catch (e) { /* style without light support */ }
+
+    applyBasemapColors();   // exact Mapbox Standard "day" palette (land/green/road/water)
+
     // --- extruded building polygons (native MapLibre fill-extrusion) --------
     const buildings = await fetchJSON("/api/buildings");
     map.addSource("buildings", { type: "geojson", data: buildings });
@@ -165,14 +312,17 @@ async function boot() {
       type: "fill-extrusion",
       source: "buildings",
       paint: {
+        // warm stone/beige, darkening with height -> reads like real buildings
         "fill-extrusion-color": [
           "interpolate", ["linear"], ["get", "height"],
-          0, "#7f8fa6", 20, "#9aa7b8", 45, "#c3ccd6",
+          0, "#dcd7cd", 12, "#d0cabd", 25, "#c1baab", 45, "#ada695", 80, "#978d7d",
         ],
         "fill-extrusion-height": ["get", "height"],
-        "fill-extrusion-opacity": 0.85,
+        "fill-extrusion-base": 0,
+        "fill-extrusion-opacity": 0.92,
+        "fill-extrusion-vertical-gradient": true,
       },
-    });
+    }, labelLayerId);
 
     // --- road network (deck.gl overlay, recoloured by congestion) ----------
     networkGeo = await fetchJSON("/api/network");
@@ -181,6 +331,8 @@ async function boot() {
     overlay = new deck.MapboxOverlay({ interleaved: true, layers: buildLayers() });
     map.addControl(overlay);
 
+    applyLightPreset(currentPreset);   // default light preset (día)
+    syncPad();                         // place the Pan-Tilt knob at the initial camera
     connect();
   });
 }
@@ -190,12 +342,13 @@ function buildLayers() {
     new deck.GeoJsonLayer({
       id: "network",
       data: networkGeo,
+      beforeId: labelLayerId,                                   // roads under the labels
       lineWidthUnits: "meters",
-      getLineWidth: 3,
+      getLineWidth: (f) => 3.2 * (f.properties.lanes || 1),     // real carriageway width
       lineWidthMinPixels: 1.5,
       getLineColor: (f) =>
-        (showCongestion && edgeColors[f.properties.id]) || [120, 130, 145],
-      updateTriggers: { getLineColor: [edgeColors, showCongestion] },
+        (showCongestion && edgeColors[f.properties.id]) || asphaltColor,
+      updateTriggers: { getLineColor: [edgeColors, showCongestion, asphaltColor] },
       pickable: false,
     }),
   ];
@@ -203,45 +356,77 @@ function buildLayers() {
   // traffic lights, coloured live from SUMO. Open junctions get a mast-arm
   // ("ménsula") with the head hanging over the road; tight ones a straight pole.
   if (showTL && tlDefs.features.length) {
+    // poles: mast-arm ("ménsula") over the road, or a straight roadside pole
     layers.push(new deck.ColumnLayer({
       id: "tl-pole-mast", data: tlMast, diskResolution: 6, radius: 0.14, extruded: true,
       getPosition: poleBase, getFillColor: [30, 33, 40], getElevation: ARM_HEIGHT,
+      parameters: TL_ON_TOP,
     }));
     layers.push(new deck.PathLayer({
       id: "tl-arm", data: tlMast, getPath: signalArm, getColor: [30, 33, 40],
       getWidth: 0.22, widthUnits: "meters", widthMinPixels: 2, capRounded: true, jointRounded: true,
-    }));
-    layers.push(new deck.IconLayer({
-      id: "tl-head-mast", data: tlMast, billboard: true,
-      getIcon: (f) => SIGNAL_ICON_HANG[signalKey(f)], getPosition: signalPosition,
-      getSize: 44, sizeUnits: "pixels", sizeMinPixels: 12, sizeMaxPixels: 66,
-      updateTriggers: { getIcon: [tlState] },
+      parameters: TL_ON_TOP,
     }));
     layers.push(new deck.ColumnLayer({
       id: "tl-pole-straight", data: tlStraight, diskResolution: 6, radius: 0.14, extruded: true,
       getPosition: poleBase, getFillColor: [30, 33, 40], getElevation: STRAIGHT_H,
+      parameters: TL_ON_TOP,
     }));
-    layers.push(new deck.IconLayer({
-      id: "tl-head-straight", data: tlStraight, billboard: true,
-      getIcon: (f) => SIGNAL_ICON_TOP[signalKey(f)], getPosition: signalHeadTop,
-      getSize: 40, sizeUnits: "pixels", sizeMinPixels: 10, sizeMaxPixels: 60,
-      updateTriggers: { getIcon: [tlState] },
+    // signal heads: a dark housing + a lit lens coloured live from SUMO's phase.
+    // Rendered as geometry (not IconLayer) so they show reliably like the poles.
+    layers.push(new deck.ScatterplotLayer({
+      id: "tl-housing", data: tlDefs.features, billboard: true,
+      getPosition: headPosition, getFillColor: [18, 20, 26],
+      getRadius: 1.9, radiusUnits: "meters", radiusMinPixels: 5, radiusMaxPixels: 18,
+      parameters: TL_ON_TOP,
+    }));
+    layers.push(new deck.ScatterplotLayer({
+      id: "tl-head", data: tlDefs.features, billboard: true,
+      getPosition: headPosition, getFillColor: tlColorFor,
+      getRadius: 1.25, radiusUnits: "meters", radiusMinPixels: 3.5, radiusMaxPixels: 13,
+      parameters: TL_ON_TOP,
+      updateTriggers: { getFillColor: [tlState] },
     }));
   }
 
-  layers.push(new deck.ScatterplotLayer({
-    id: "vehicles",
-    data: vehicles,
-    getPosition: (d) => [d.lon, d.lat],
-    getFillColor: (d) => speedColor(d.speed),
-    getRadius: 5,
-    radiusUnits: "meters",
-    radiusMinPixels: 2.5,
-    stroked: true,
-    getLineColor: [10, 12, 18],
-    lineWidthMinPixels: 0.5,
-    pickable: true,
-  }));
+  // vehicles: 3D glTF models (ScenegraphLayer) when available, else box fallback
+  if (show3D && GLTF_LOADER) {
+    layers.push(new deck.ScenegraphLayer({
+      id: "vehicles",
+      data: vehicles,
+      scenegraph: VEHICLE_MODEL,
+      loaders: [GLTF_LOADER],
+      getPosition: (d) => [d.lon, d.lat],
+      // [pitch, yaw, roll]; yaw = -heading (SUMO 0=N, CW), roll 90 stands the model up
+      getOrientation: (d) => [0, -(d.angle || 0), 90],
+      getColor: vehicleColor,                               // tints the model per vehicle
+      getScale: (d) => (isBus(d) ? [1.7, 1.7, 1.7] : [1, 1, 1]),
+      sizeScale: VEHICLE_SIZE,
+      sizeMinPixels: 2,
+      sizeMaxPixels: 90,
+      _lighting: "pbr",
+      pickable: true,
+      updateTriggers: { getColor: vehicles, getScale: vehicles },
+    }));
+  } else {
+    // reliable coloured markers — same layer type as the working signal heads;
+    // radiusMinPixels guarantees they're visible at any zoom (buses bigger)
+    layers.push(new deck.ScatterplotLayer({
+      id: "vehicles",
+      data: vehicles,
+      getPosition: (d) => [d.lon, d.lat],
+      getFillColor: vehicleColor,
+      getRadius: (d) => (isBus(d) ? 4.2 : 2.6),
+      radiusUnits: "meters",
+      radiusMinPixels: 3,
+      radiusMaxPixels: 16,
+      stroked: true,
+      getLineColor: [15, 17, 22],
+      lineWidthMinPixels: 0.8,
+      pickable: true,
+      updateTriggers: { getFillColor: vehicles, getRadius: vehicles },
+    }));
+  }
 
   return layers;
 }
@@ -251,14 +436,21 @@ function refreshLayers() {
 }
 
 // --- WebSocket live stream --------------------------------------------------
-let manualClose = false;
+// Each connection is tracked by identity (sock === ws). When we switch scenario
+// or reset, the previous socket is superseded, so its late frames and its close
+// event are ignored — this prevents two SUMO streams alternating (the flicker).
 function connect() {
-  manualClose = false;
-  ws = new WebSocket(WS_URL + "?level=" + currentLevel);
-  ws.onopen = () => setConn(true);
-  ws.onclose = () => { setConn(false); if (!manualClose) setTimeout(connect, 2000); };
-  ws.onerror = () => setConn(false);
-  ws.onmessage = (ev) => {
+  const sock = new WebSocket(WS_URL + "?level=" + currentLevel);
+  ws = sock;
+  sock.onopen = () => { if (sock === ws) setConn(true); };
+  sock.onerror = () => { if (sock === ws) setConn(false); };
+  sock.onclose = () => {
+    if (sock !== ws) return;                       // superseded by a newer connection
+    setConn(false);
+    setTimeout(() => { if (sock === ws) connect(); }, 2000);   // auto-reconnect only if still current
+  };
+  sock.onmessage = (ev) => {
+    if (sock !== ws) return;                        // drop frames from an old/switched-out run
     const msg = JSON.parse(ev.data);
     if (msg.type === "frame") {
       vehicles = msg.vehicles;
@@ -287,14 +479,14 @@ els.play.onclick = () => {
   send({ cmd: paused ? "pause" : "play" });
 };
 els.reset.onclick = () => {
-  if (ws) { manualClose = true; ws.close(); }
+  if (ws) ws.close();
   vehicles = []; edgeColors = {}; refreshLayers();
   paused = false; els.play.textContent = "⏸ Pausar";
   connect();
 };
 els.level.onchange = () => {
   currentLevel = els.level.value;                 // switch scenario -> reconnect
-  if (ws) { manualClose = true; ws.close(); }
+  if (ws) ws.close();
   vehicles = []; edgeColors = {}; tlState = {}; refreshLayers();
   paused = false; els.play.textContent = "⏸ Pausar";
   connect();
@@ -309,11 +501,45 @@ els.buildings.onchange = () => {
 };
 els.congestion.onchange = () => { showCongestion = els.congestion.checked; refreshLayers(); };
 els.tl.onchange = () => { showTL = els.tl.checked; refreshLayers(); };
+els.model3d.onchange = () => { show3D = els.model3d.checked; refreshLayers(); };
 
-// --- map rotation ---------------------------------------------------------
-els.rotLeft.onclick = () => map && map.easeTo({ bearing: map.getBearing() - 30, duration: 300 });
-els.rotRight.onclick = () => map && map.easeTo({ bearing: map.getBearing() + 30, duration: 300 });
-els.rotNorth.onclick = () => map && map.easeTo({ bearing: 0, duration: 400 });
+// --- unified Pan-Tilt pad: X = bearing (pan), Y = pitch (tilt) --------------
+const PITCH_MAX = 85;
+const COMPASS = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"];
+function placeKnob(nx, ny, bearing, pitch) {
+  if (els.padKnob) { els.padKnob.style.left = `${nx * 100}%`; els.padKnob.style.top = `${ny * 100}%`; }
+  if (els.ptRead) {
+    const b = Math.round(bearing);
+    const dir = COMPASS[Math.round((((b % 360) + 360) % 360) / 45) % 8];
+    els.ptRead.textContent = `${dir} ${b}° · tilt ${Math.round(pitch)}°`;
+  }
+}
+function syncPad() {                     // reflect the camera on the pad (gestures / orbit)
+  if (!map) return;
+  const b = map.getBearing(), p = map.getPitch();
+  placeKnob((b / 180 + 1) / 2, 1 - p / PITCH_MAX, b, p);
+  setViewLabel(p <= 5);                  // keep the 2D/3D button label in sync
+}
+function padPoint(ev) {                   // pointer -> bearing (X) + pitch (Y)
+  const r = els.pad.getBoundingClientRect();
+  const nx = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width));
+  const ny = Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height));
+  if (map) {
+    stopOrbit();
+    map.setBearing((nx * 2 - 1) * 180);     // left -180 .. right +180 (centre = north)
+    map.setPitch((1 - ny) * PITCH_MAX);     // top = horizon (85°), bottom = top-down (0°)
+    syncPad();                              // knob follows the (clamped) camera
+  }
+}
+let padDrag = false;
+els.pad.addEventListener("pointerdown", (ev) => {
+  padDrag = true; els.pad.classList.add("grabbing");
+  try { els.pad.setPointerCapture(ev.pointerId); } catch (e) {}
+  padPoint(ev);
+});
+els.pad.addEventListener("pointermove", (ev) => { if (padDrag) padPoint(ev); });
+els.pad.addEventListener("pointerup", () => { padDrag = false; els.pad.classList.remove("grabbing"); });
+els.pad.addEventListener("dblclick", () => { if (map) { stopOrbit(); map.easeTo({ bearing: 0, pitch: 55, duration: 400 }); } });
 
 let orbitRAF = null;
 function stopOrbit() {
@@ -331,20 +557,27 @@ els.orbit.onclick = () => {
 els.zoomIn.onclick = () => map && map.zoomIn();
 els.zoomOut.onclick = () => map && map.zoomOut();
 
-// --- top-down (bird's-eye) view toggle ------------------------------------
-let topView = false;                              // false = 3D perspective, true = looking straight down
+// --- 2D top-down / 3D perspective toggle ----------------------------------
+let topView = false;                     // label shows the view the NEXT click gives
 function setViewLabel(top) {
+  if (!els.viewTop) return;
   topView = top;
-  els.viewTop.textContent = top ? "3D" : "2D";    // label = the view the next click gives you
+  els.viewTop.textContent = top ? "3D" : "2D";
   els.viewTop.classList.toggle("active", top);
 }
 els.viewTop.onclick = () => {
   if (!map) return;
+  stopOrbit();
   const goTop = !topView;
-  map.easeTo({ pitch: goTop ? 0 : 55, duration: 500 });
-  setViewLabel(goTop);                            // optimistic; moveend confirms from real pitch
+  map.easeTo({ pitch: goTop ? 0 : 55, duration: 500 });  // 2D top-down vs 3D perspective
+  setViewLabel(goTop);
 };
-function syncFromPitch() { if (map) setViewLabel(map.getPitch() <= 5); }
+
+// --- light presets (dawn / day / dusk / night) ----------------------------
+els.light_dawn.onclick = () => applyLightPreset("dawn");
+els.light_day.onclick = () => applyLightPreset("day");
+els.light_dusk.onclick = () => applyLightPreset("dusk");
+els.light_night.onclick = () => applyLightPreset("night");
 
 function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));

@@ -46,12 +46,15 @@ async def lifespan(app: FastAPI):
     _state["buildings"] = buildings_geojson(poly_file, netgeo)
     _state["trafficlights"] = trafficlights_geojson(
         netgeo, building_vertices_local(poly_file))
-    _state["meta"] = {
+    meta = {
         **netgeo.bounds_center(),
         "origin": [settings.origin_lon, settings.origin_lat],
         "step_length": settings.step_length,
         "mode": settings.sumo_mode,
     }
+    if settings.view_lon is not None and settings.view_lat is not None:
+        meta["center"] = [settings.view_lon, settings.view_lat]   # open on the demand area
+    _state["meta"] = meta
     yield
     _state.clear()
 

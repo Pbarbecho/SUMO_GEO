@@ -9,18 +9,35 @@
 </head>
 <body>
   <div id="map"></div>
+  <div id="tint"></div>
+
+  <div id="pantilt-wrap">
+    <div id="pantilt" class="pad" title="Arrastra: horizontal = giro (pan) · vertical = inclinación (tilt). Doble clic = norte + 3D.">
+      <span class="pad-cross"></span>
+      <span id="pad-knob" class="pad-knob"></span>
+    </div>
+    <span id="pt-read" class="pt-read">N 0° · tilt 55°</span>
+  </div>
 
   <div id="topbar">
     <button id="zoom-in" class="icon-btn" title="Acercar">+</button>
     <button id="zoom-out" class="icon-btn" title="Alejar">−</button>
     <span class="topbar-sep"></span>
-    <button id="rot-left" class="icon-btn" title="Girar a la izquierda (Shift + ←)">↺</button>
-    <button id="rot-north" class="icon-btn" title="Orientar al norte">N</button>
-    <button id="rot-right" class="icon-btn" title="Girar a la derecha (Shift + →)">↻</button>
-    <span class="topbar-sep"></span>
     <button id="orbit" class="icon-btn" title="Órbita automática">◐</button>
+    <button id="view-top" class="icon-btn" title="Vista superior 2D / perspectiva 3D">2D</button>
     <span class="topbar-sep"></span>
-    <button id="view-top" class="icon-btn" title="Vista superior — ver desde arriba">2D</button>
+    <button id="light-dawn" class="icon-btn" title="Amanecer">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18h18"/><path d="M8 18a4 4 0 0 1 8 0"/><path d="M12 3v5m-2-3 2-2 2 2"/></svg>
+    </button>
+    <button id="light-day" class="icon-btn" title="Día">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M19 5l-1.5 1.5M6.5 17.5 5 19"/></svg>
+    </button>
+    <button id="light-dusk" class="icon-btn" title="Atardecer">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18h18"/><path d="M8 18a4 4 0 0 1 8 0"/><path d="M12 8V3m-2 3 2 2 2-2"/></svg>
+    </button>
+    <button id="light-night" class="icon-btn" title="Noche">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z"/></svg>
+    </button>
   </div>
 
   <div id="panel">
@@ -51,6 +68,9 @@
     <label class="row">
       <input id="toggle-tl" type="checkbox" checked /> Semáforos
     </label>
+    <label class="row">
+      <input id="toggle-3d" type="checkbox" /> Modelos 3D glTF (experimental)
+    </label>
     <div id="stats">
       <div><b id="veh-count">0</b> vehículos</div>
       <div>t = <b id="sim-time">0</b> s</div>
@@ -71,6 +91,10 @@
 
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/deck.gl@9.0.38/dist.min.js"></script>
+  <!-- glTF loader: the deck.gl script bundle ships ScenegraphLayer but NOT the
+       glTF loader, so we add it here and hand it to the layer (window.loaders). -->
+  <script src="https://unpkg.com/@loaders.gl/core@4.2.0/dist/dist.min.js"></script>
+  <script src="https://unpkg.com/@loaders.gl/gltf@4.2.0/dist/dist.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
