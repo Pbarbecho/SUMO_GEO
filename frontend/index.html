@@ -60,16 +60,13 @@
       <span id="fps-val">10 fps</span>
     </label>
     <label class="row">
-      <input id="toggle-buildings" type="checkbox" checked /> Edificios 3D
+      <input id="toggle-buildings" type="checkbox" checked /> Edificios
     </label>
     <label class="row">
       <input id="toggle-congestion" type="checkbox" checked /> Congestión (LOS)
     </label>
     <label class="row">
       <input id="toggle-tl" type="checkbox" checked /> Semáforos
-    </label>
-    <label class="row">
-      <input id="toggle-3d" type="checkbox" /> Modelos 3D glTF (experimental)
     </label>
     <label class="row">
       <input id="toggle-poi" type="checkbox" /> PoI
@@ -101,10 +98,6 @@
 
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/deck.gl@9.0.38/dist.min.js"></script>
-  <!-- glTF loader: the deck.gl script bundle ships ScenegraphLayer but NOT the
-       glTF loader, so we add it here and hand it to the layer (window.loaders). -->
-  <script src="https://unpkg.com/@loaders.gl/core@4.2.0/dist/dist.min.js"></script>
-  <script src="https://unpkg.com/@loaders.gl/gltf@4.2.0/dist/dist.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

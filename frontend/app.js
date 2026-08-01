@@ -18,7 +18,6 @@ const els = {
   buildings: document.getElementById("toggle-buildings"),
   congestion: document.getElementById("toggle-congestion"),
   tl: document.getElementById("toggle-tl"),
-  model3d: document.getElementById("toggle-3d"),
   poi: document.getElementById("toggle-poi"),
   busy: document.getElementById("toggle-busy"),
   busyMin: document.getElementById("busy-min"),
@@ -49,7 +48,6 @@ let tlState = {};         // tlsID -> live state string ("GrGr...")
 let paused = false;
 let showCongestion = true;
 let showTL = true;
-let show3D = false;         // false = reliable 3D boxes (default); true = glTF models (experimental)
 let showBusy = false;       // icon markers on streets with >= busyMin vehicles
 let busyMin = 2;            // busy-street threshold (from the selector)
 let currentLevel = "mid";   // scenario level (low/mid/high) from the mapa/ files
@@ -116,16 +114,6 @@ function vehicleParts(d) {
     { polygon: partRect(d, L, W, 0.47, 0.05, 0.84), height: 0.62, color: HEADLIGHT },    // headlights
     { polygon: partRect(d, L, W, -0.48, 0.045, 0.84), height: 0.64, color: TAILLIGHT },  // taillights
   ];
-}
-
-// 3D glTF model (deck.gl-data low-poly truck). The <script> deck.gl bundle
-// ships ScenegraphLayer but NOT the glTF loader, so index.html loads
-// @loaders.gl/gltf and we hand its GLTFLoader to the layer / register it.
-const VEHICLE_MODEL = "https://raw.githubusercontent.com/visgl/deck.gl-data/master/luma.gl/scenegraph/low_poly_truck/scene.gltf";
-const VEHICLE_SIZE = 3;   // model scale — lower if the trucks look too big, raise if too small
-const GLTF_LOADER = (window.loaders && window.loaders.GLTFLoader) || null;
-if (GLTF_LOADER && window.loaders.registerLoaders) {
-  try { window.loaders.registerLoaders([GLTF_LOADER]); } catch (e) {}
 }
 
 // --- light presets (emulate Mapbox Standard's lightPreset in MapLibre) -------
@@ -219,6 +207,18 @@ function setPoiVisible(show) {
   for (const l of map.getStyle().layers) {
     if (l.type === "symbol" && l["source-layer"] === "poi") {
       try { map.setLayoutProperty(l.id, "visibility", show ? "visible" : "none"); } catch (e) {}
+    }
+  }
+}
+
+// Show/hide ALL buildings: the SUMO polygons (buildings-3d) AND the basemap's
+// OSM buildings (source-layer "building": both the 2D fill and the 3D extrusion).
+function setBuildingsVisible(show) {
+  if (!map) return;
+  const v = show ? "visible" : "none";
+  for (const l of map.getStyle().layers) {
+    if (l.id === "buildings-3d" || l["source-layer"] === "building" || /building/i.test(l.id)) {
+      try { map.setLayoutProperty(l.id, "visibility", v); } catch (e) {}
     }
   }
 }
@@ -374,6 +374,7 @@ async function boot() {
         "fill-extrusion-vertical-gradient": true,
       },
     }, labelLayerId);
+    setBuildingsVisible(els.buildings.checked);   // default: unchecked -> all buildings hidden
 
     // --- road network (deck.gl overlay, recoloured by congestion) ----------
     networkGeo = await fetchJSON("/api/network");
@@ -480,44 +481,23 @@ function buildLayers() {
     }));
   }
 
-  // vehicles: 3D glTF models (ScenegraphLayer) when available, else box fallback
-  if (show3D && GLTF_LOADER) {
-    layers.push(new deck.ScenegraphLayer({
-      id: "vehicles",
-      data: vehicles,
-      scenegraph: VEHICLE_MODEL,
-      loaders: [GLTF_LOADER],
-      getPosition: (d) => [d.lon, d.lat],
-      // [pitch, yaw, roll]; yaw = -heading (SUMO 0=N, CW), roll 90 stands the model up
-      getOrientation: (d) => [0, -(d.angle || 0), 90],
-      getColor: vehicleColor,                               // tints the model per vehicle
-      getScale: (d) => (isBus(d) ? [1.7, 1.7, 1.7] : [1, 1, 1]),
-      sizeScale: VEHICLE_SIZE,
-      sizeMinPixels: 2,
-      sizeMaxPixels: 90,
-      _lighting: "pbr",
-      pickable: true,
-      updateTriggers: { getColor: vehicles, getScale: vehicles },
-    }));
-  } else {
-    // procedural 3D vehicles: several extruded parts per vehicle (chassis,
-    // greenhouse/windshield, roof, head/tail lights) at real size — offline.
-    layers.push(new deck.PolygonLayer({
-      id: "vehicles",
-      data: vehicles.flatMap(vehicleParts),
-      extruded: true,
-      getPolygon: (p) => p.polygon,
-      getElevation: (p) => p.height,
-      getFillColor: (p) => p.color,
-      material: { ambient: 0.5, diffuse: 0.7, shininess: 20 },
-      stroked: false,
-      pickable: false,
-      updateTriggers: { getPolygon: vehicles, getElevation: vehicles, getFillColor: vehicles },
-    }));
-  }
+  // procedural 3D vehicles: several extruded parts per vehicle (chassis,
+  // greenhouse/windshield, roof, head/tail lights) at real size — 100% offline.
+  layers.push(new deck.PolygonLayer({
+    id: "vehicles",
+    data: vehicles.flatMap(vehicleParts),
+    extruded: true,
+    getPolygon: (p) => p.polygon,
+    getElevation: (p) => p.height,
+    getFillColor: (p) => p.color,
+    material: { ambient: 0.5, diffuse: 0.7, shininess: 20 },
+    stroked: false,
+    pickable: false,
+    updateTriggers: { getPolygon: vehicles, getElevation: vehicles, getFillColor: vehicles },
+  }));
 
-  // busy streets: an IconLayer pin (deck.gl icon-layer style) on every street
-  // whose current vehicle count reaches the selector threshold (busyMin)
+  // busy streets: a beacon marker on every street whose current vehicle count
+  // reaches the selector threshold (busyMin)
   if (showBusy) {
     const pts = [];
     for (const id in edgeCounts) {
@@ -525,20 +505,63 @@ function buildLayers() {
         pts.push({ position: edgeMid[id], count: edgeCounts[id] });
       }
     }
-    layers.push(new deck.IconLayer({
-      id: "busy-streets",
+    // floating pin: a tether down to the street + a round "drop" head hovering
+    // above it + the vehicle count. Built from reliable layers because deck.gl's
+    // IconLayer does not render in this interleaved setup.
+    const PIN_H = 15;                     // metres the pin floats above the street
+    const atStreet = (d) => [d.position[0], d.position[1], 0];
+    const atHead = (d) => [d.position[0], d.position[1], PIN_H];
+    const headR = (d) => 13 + Math.min(d.count, 10);   // head radius (px)
+    layers.push(new deck.LineLayer({
+      id: "busy-tether",
       data: pts,
-      iconAtlas: "marker.png",
-      iconMapping: { marker: { x: 0, y: 0, width: 128, height: 128, anchorY: 128, mask: true } },
-      getIcon: () => "marker",
-      getPosition: (d) => d.position,
-      getSize: (d) => 28 + Math.min(d.count, 20) * 1.6,
-      sizeUnits: "pixels",
-      getColor: (d) => busyColor(d.count),
+      getSourcePosition: atStreet,
+      getTargetPosition: atHead,
+      getColor: (d) => [...busyColor(d.count), 200],
+      getWidth: 2, widthMinPixels: 1.5,
+      parameters: { depthTest: false },
+      updateTriggers: { getColor: busyMin },
+    }));
+    // inverted-teardrop point: a down-triangle just below the head. Drawn BEFORE
+    // the head so the round head covers its top -> a smooth teardrop silhouette.
+    layers.push(new deck.TextLayer({
+      id: "busy-point",
+      data: pts,
       billboard: true,
+      getPosition: atHead,
+      getText: () => "▼",
+      characterSet: ["▼"],               // not in the default ASCII set -> declare it
+      getSize: (d) => headR(d) * 2.1, sizeUnits: "pixels",
+      getColor: (d) => busyColor(d.count),
+      getPixelOffset: (d) => [0, headR(d) - 4],
+      getTextAnchor: "middle", getAlignmentBaseline: "top",
+      parameters: { depthTest: false },
+      updateTriggers: { getColor: busyMin, getSize: busyMin, getPixelOffset: busyMin },
+    }));
+    layers.push(new deck.ScatterplotLayer({
+      id: "busy-head",
+      data: pts,
+      billboard: true,
+      getPosition: atHead,
+      getRadius: headR,
+      radiusUnits: "pixels",
+      getFillColor: (d) => busyColor(d.count),
       parameters: { depthTest: false },
       pickable: true,
-      updateTriggers: { getSize: busyMin, getColor: busyMin },
+      updateTriggers: { getRadius: busyMin, getFillColor: busyMin },
+    }));
+    layers.push(new deck.TextLayer({
+      id: "busy-count",
+      data: pts,
+      billboard: true,
+      getPosition: atHead,
+      getText: (d) => String(d.count),
+      getSize: 14, sizeUnits: "pixels",
+      getColor: [255, 255, 255],
+      fontWeight: 700,
+      getTextAnchor: "middle", getAlignmentBaseline: "center",
+      parameters: { depthTest: false },
+      updateTriggers: { getText: busyMin },
     }));
   }
 
@@ -609,13 +632,9 @@ els.fps.oninput = () => {
   els.fpsVal.textContent = `${els.fps.value} fps`;
   send({ cmd: "speed", fps: Number(els.fps.value) });
 };
-els.buildings.onchange = () => {
-  if (map.getLayer("buildings-3d"))
-    map.setLayoutProperty("buildings-3d", "visibility", els.buildings.checked ? "visible" : "none");
-};
+els.buildings.onchange = () => setBuildingsVisible(els.buildings.checked);
 els.congestion.onchange = () => { showCongestion = els.congestion.checked; refreshLayers(); };
 els.tl.onchange = () => { showTL = els.tl.checked; refreshLayers(); };
-els.model3d.onchange = () => { show3D = els.model3d.checked; refreshLayers(); };
 els.poi.onchange = () => setPoiVisible(els.poi.checked);
 els.busy.onchange = () => { showBusy = els.busy.checked; refreshLayers(); };
 els.busyMin.oninput = () => { busyMin = Number(els.busyMin.value); els.busyVal.textContent = busyMin; refreshLayers(); };
@@ -699,5 +718,16 @@ els.light_night.onclick = () => applyLightPreset("night");
 function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
+
+// --- auto-hide the control panel: collapses to its title bar when the pointer
+//     leaves, expands on hover (shown briefly on load so the controls are found)
+(() => {
+  const p = document.getElementById("panel");
+  if (!p) return;
+  let t = null;
+  p.addEventListener("mouseenter", () => { clearTimeout(t); p.classList.remove("collapsed"); });
+  p.addEventListener("mouseleave", () => { clearTimeout(t); t = setTimeout(() => p.classList.add("collapsed"), 600); });
+  setTimeout(() => p.classList.add("collapsed"), 2500);
+})();
 
 boot().catch((e) => { els.conn.textContent = "error: " + e.message; });
