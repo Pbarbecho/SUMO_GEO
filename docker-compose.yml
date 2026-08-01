@@ -12,13 +12,14 @@ services:
     environment:
       APP_SUMO_MODE: managed
 
-      # ===== ACTIVE SCENARIO: metro network, traffic concentrated in the centre =====
-      
-      #APP_SUMO_CONFIG: /mapa/metro_mid.sumocfg
-      #APP_SUMO_CONFIG_TEMPLATE: /mapa/metro_{level}.sumocfg
-      #APP_VIEW_LON: "-79.004"        # open on downtown (metro's geometric centre is off-centre)
-      #APP_VIEW_LAT: "-2.902"
-      #APP_SIM_BEGIN: "28800"         # open at the 08:00 peak so there's traffic at once
+      # ===== ACTIVE SCENARIO: metro network — ALL of Cuenca, 24 h levels =====
+      # Demand spans the whole metropolitan net (O/D restricted to its largest
+      # strongly-connected component, so SUMO logs no "no route" warnings).
+      APP_SUMO_CONFIG: /mapa/metro_mid.sumocfg
+      APP_SUMO_CONFIG_TEMPLATE: /mapa/metro_{level}.sumocfg
+      APP_VIEW_LON: "-79.004"        # open on downtown (metro's geometric centre is off-centre)
+      APP_VIEW_LAT: "-2.902"
+      APP_SIM_BEGIN: "28800"         # open at the 08:00 peak so there's traffic at once
 
       # ===== ALTERNATIVE: real OSM centre from scripts/build_city.sh (has 3D buildings) =====
       # 1) Build the map (on the HOST, needs internet):
@@ -26,7 +27,7 @@ services:
       # 2) Comment out the three metro lines above, then uncomment ONE option:
       #
       #  (a) Just the map + short demo traffic (0-600 s) — no levels:
-      APP_SUMO_CONFIG: /sumo/cuenca.sumocfg
+      #      APP_SUMO_CONFIG: /sumo/cuenca.sumocfg
       #      (also comment APP_SIM_BEGIN above — the demo starts at t=0)
       #
       #  (b) Full Bajo/Medio/Alto (24 h) + buildings — first also run:
@@ -34,8 +35,8 @@ services:
       #        --types sumo/vtypes.add.xml --transit sumo/transit.add.xml \
       #        --outdir sumo --prefix cuenca --low 3000 --mid 8000 --high 18000 --bus-share 0.05
       #      APP_SUMO_CONFIG: /sumo/cuenca_mid.sumocfg
-      APP_SUMO_CONFIG_TEMPLATE: /sumo/cuenca_{level}.sumocfg
-      APP_POLY_FILE: /sumo/cuenca.poly.xml   # buildings (the level cfgs don't list the poly)
+      #      APP_SUMO_CONFIG_TEMPLATE: /sumo/cuenca_{level}.sumocfg
+      #      APP_POLY_FILE: /sumo/cuenca.poly.xml   # buildings (the level cfgs don't list the poly)
       #  The net is already the centre, so APP_VIEW_LON/LAT aren't needed.
       # =====================================================================================
 

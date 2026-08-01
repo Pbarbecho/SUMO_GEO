@@ -678,17 +678,24 @@ function inspectorHtml(info) {
 
 // --- historical panel (right side): time series over the simulation ---------
 const HIST_MAX = 720;                 // kept points (~12 min at 1 pt/s)
-const hist = { cars: [], buses: [], co2: [], tt: [], wait: [] };
+const hist = { t: [], cars: [], buses: [], co2: [], tt: [], wait: [] };
 let lastHistMs = 0;
 const HIST_UPDATE_MS = 1000;          // sample + redraw at most once per second
 
 function histPush(arr, v) { arr.push(v); if (arr.length > HIST_MAX) arr.shift(); }
+
+function simHHMM(sec) {
+  const h = Math.floor(sec / 3600) % 24, m = Math.floor((sec % 3600) / 60);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
 
 function drawSeries(canvasId, seriesArr, colors) {
   const c = document.getElementById(canvasId);
   if (!c) return;
   const ctx = c.getContext("2d");
   const W = c.width, H = c.height;
+  const AX = 12;                         // reserved strip for the time axis (px)
+  const plotH = H - AX;
   ctx.clearRect(0, 0, W, H);
   let max = 1;
   for (const s of seriesArr) for (const v of s) if (v != null && v > max) max = v;
@@ -699,20 +706,36 @@ function drawSeries(canvasId, seriesArr, colors) {
     ctx.beginPath();
     for (let i = 0; i < s.length; i++) {
       const x = 1 + (i / Math.max(s.length - 1, 1)) * (W - 2);
-      const y = H - 3 - ((s[i] == null ? 0 : s[i]) / max) * (H - 8);
+      const y = plotH - 2 - ((s[i] == null ? 0 : s[i]) / max) * (plotH - 7);
       i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
     }
     ctx.stroke();
   });
+  // time axis (simulated clock) — start / middle / end of the visible window
+  const ts = hist.t;
+  if (ts.length > 1) {
+    ctx.strokeStyle = "#2c3644";
+    ctx.beginPath(); ctx.moveTo(0, plotH + 0.5); ctx.lineTo(W, plotH + 0.5); ctx.stroke();
+    ctx.fillStyle = "#8b95a5";
+    ctx.font = "9px system-ui, sans-serif";
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    ctx.fillText(simHHMM(ts[0]), 1, plotH + 2);
+    ctx.textAlign = "center";
+    ctx.fillText(simHHMM(ts[Math.floor(ts.length / 2)]), W / 2, plotH + 2);
+    ctx.textAlign = "right";
+    ctx.fillText(simHHMM(ts[ts.length - 1]), W - 1, plotH + 2);
+  }
 }
 
-function updateHistory(stats, vehCount) {
+function updateHistory(stats, vehCount, simT) {
   const now = performance.now();
   if (now - lastHistMs < HIST_UPDATE_MS) return;
   lastHistMs = now;
   const types = stats.types || {};
   let buses = 0;
   for (const k in types) if (/bus|coach|tram/i.test(k)) buses += types[k];
+  histPush(hist.t, simT || 0);
   histPush(hist.cars, vehCount - buses);
   histPush(hist.buses, buses);
   histPush(hist.co2, stats.co2 || 0);
@@ -812,7 +835,7 @@ function connect() {
         losStamp++; lastLosMs = now;
       }
       tlState = msg.tls || {};
-      if (msg.stats) updateHistory(msg.stats, vehicles.length);
+      if (msg.stats) updateHistory(msg.stats, vehicles.length, msg.t);
       els.vehCount.textContent = vehicles.length;
       els.simTime.textContent = msg.t;
       refreshLayers();

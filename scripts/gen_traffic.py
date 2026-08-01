@@ -69,6 +69,56 @@ def candidate_edges(net, bbox=None) -> list[str]:
     return out
 
 
+def largest_scc(net, edge_ids: list[str]) -> list[str]:
+    """Largest strongly-connected component of the edge graph (iterative
+    Kosaraju). Sampling origins AND destinations inside it guarantees a route
+    exists between any pair, so SUMO's on-the-fly routing emits no 'no route
+    for vehicle' warnings — no duarouter pass needed (fast on huge nets)."""
+    ids = set(edge_ids)
+
+    def neigh(eid: str, rev: bool = False) -> list[str]:
+        e = net.getEdge(eid)
+        conns = e.getIncoming() if rev else e.getOutgoing()
+        keys = conns.keys() if hasattr(conns, "keys") else conns
+        return [k.getID() for k in keys if k.getID() in ids]
+
+    visited: set = set()
+    order: list[str] = []
+    for s in edge_ids:                      # forward DFS, post-order
+        if s in visited:
+            continue
+        visited.add(s)
+        stack = [(s, iter(neigh(s)))]
+        while stack:
+            node, it = stack[-1]
+            for nxt in it:
+                if nxt not in visited:
+                    visited.add(nxt)
+                    stack.append((nxt, iter(neigh(nxt))))
+                    break
+            else:
+                order.append(node)
+                stack.pop()
+
+    best: list[str] = []
+    seen: set = set()
+    for s in reversed(order):               # reverse-graph passes
+        if s in seen:
+            continue
+        seen.add(s)
+        comp, stack2 = [], [s]
+        while stack2:
+            n = stack2.pop()
+            comp.append(n)
+            for nxt in neigh(n, rev=True):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack2.append(nxt)
+        if len(comp) > len(best):
+            best = comp
+    return best
+
+
 def sample_depart(rng: random.Random, end: float) -> float:
     hours = min(24, max(1, int(end // 3600)))
     hour = rng.choices(range(hours), weights=HOURLY[:hours], k=1)[0]
@@ -107,7 +157,7 @@ def route_with_duarouter(net_path, trips_file, add_paths, rou_file):
     subprocess.run(
         [duarouter, "-n", net_path, "-r", trips_file, "-a", add_paths,
          "-o", rou_file, "--ignore-errors", "true", "--repair", "true",
-         "--no-warnings", "true", "--no-step-log", "true", "--routing-threads", "4"],
+         "--no-warnings", "true", "--no-step-log", "true", "--routing-threads", "2"],
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for junk in (trips_file, rou_file[:-8] + ".rou.alt.xml"):  # drop trips + alt file
         try:
@@ -201,6 +251,9 @@ def main():
                     help="minLon,minLat,maxLon,maxLat: restrict all trips to this area")
     ap.add_argument("--no-duarouter", action="store_true",
                     help="skip duarouter (write raw trips; faster but may warn 'no route')")
+    ap.add_argument("--connected", action="store_true",
+                    help="restrict O/D to the largest strongly-connected component: "
+                         "every trip is routable, so --no-duarouter stays warning-free")
     ap.add_argument("--levels", default="low,mid,high",
                     help="comma-separated subset of levels to (re)generate")
     args = ap.parse_args()
@@ -215,6 +268,10 @@ def main():
     edges = candidate_edges(net, bbox)
     if not edges:
         raise SystemExit("No candidate edges (check --center-bbox covers roads in the net).")
+    if args.connected:
+        n0 = len(edges)
+        edges = largest_scc(net, edges)
+        print(f"  SCC mayor: {len(edges)} de {n0} aristas (O/D siempre conectados)")
     car_types = read_vtype_ids(args.types)
     fwd, bwd = tram_corridor(net, edges) if args.tram else ([], [])
     area = f" | zona centro {args.center_bbox}" if bbox else ""

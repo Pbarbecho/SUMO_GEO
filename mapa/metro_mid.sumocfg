@@ -2,7 +2,7 @@
 <configuration>
     <input>
         <net-file value="network.net.xml"/>
-        <route-files value="metro_mid.rou.xml"/>
+        <route-files value="vtypes.add.xml,transit.add.xml,metro_mid.rou.xml"/>
     </input>
     <time><begin value="0"/><end value="86400"/><step-length value="1.0"/></time>
     <processing>
