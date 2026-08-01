@@ -22,7 +22,7 @@ _CONN_COUNTER = itertools.count()   # unique traci connection labels
 # in ONE round trip per step instead of ~6 socket calls per vehicle. This is what
 # makes thousands of concurrent vehicles feasible.
 _SUB_VARS = (tc.VAR_POSITION, tc.VAR_ANGLE, tc.VAR_SPEED, tc.VAR_TYPE,
-             tc.VAR_ROAD_ID)
+             tc.VAR_ROAD_ID, tc.VAR_CO2EMISSION, tc.VAR_WAITING_TIME)
 
 
 class SumoBridge:
@@ -32,6 +32,14 @@ class SumoBridge:
         self.running = False
         self._libsumo = False
         self._dims: dict = {}     # typeID -> (length, width) metres, cached
+        # aggregates for the historical panel
+        self._depart_t: dict = {}                 # vid -> departure sim-time
+        from collections import deque
+        self._tt = deque(maxlen=300)              # travel times of recent arrivals (s)
+        self._arrived_total = 0
+        self.last_co2 = 0.0                       # fleet total, mg/s (from subscriptions)
+        self.last_wait_mean = 0.0                 # mean waiting of stopped vehicles (s)
+        self.last_wait_n = 0                      # how many vehicles are waiting
 
     def _import_client(self):
         if settings.use_libsumo:
@@ -79,12 +87,19 @@ class SumoBridge:
 
     def step(self) -> float:
         self.conn.simulationStep()
+        now = self.conn.simulation.getTime()
         try:                                    # keep the subscription set complete
             for vid in self.conn.simulation.getDepartedIDList():
                 self.conn.vehicle.subscribe(vid, _SUB_VARS)
+                self._depart_t[vid] = now       # for travel-time stats
+            for vid in self.conn.simulation.getArrivedIDList():
+                t0 = self._depart_t.pop(vid, None)
+                if t0 is not None:
+                    self._tt.append(now - t0)
+                    self._arrived_total += 1
         except Exception:
             pass
-        return self.conn.simulation.getTime()
+        return now
 
     def _type_dims(self, type_id: str) -> tuple[float, float]:
         """(length, width) in metres for a vType, queried once and cached so the
@@ -109,11 +124,18 @@ class SumoBridge:
         if not res and conn.vehicle.getIDCount() > 0:
             return self._vehicles_polled(netgeo)             # safety fallback
         out = []
+        co2_total = 0.0
+        wait_sum, wait_n = 0.0, 0
         for vid, r in res.items():
             x, y = r[tc.VAR_POSITION]
             lon, lat = netgeo.xy_to_lonlat(x, y)
             vtype = r[tc.VAR_TYPE]
             length, width = self._type_dims(vtype)
+            co2_total += r.get(tc.VAR_CO2EMISSION, 0.0)
+            w = r.get(tc.VAR_WAITING_TIME, 0.0)
+            if w > 0:                            # stopped (mostly at signals/queues)
+                wait_sum += w
+                wait_n += 1
             out.append({
                 "id": vid,
                 "lon": lon,
@@ -125,7 +147,21 @@ class SumoBridge:
                 "wid": width,
                 "edge": r[tc.VAR_ROAD_ID],
             })
+        self.last_co2 = co2_total
+        self.last_wait_mean = (wait_sum / wait_n) if wait_n else 0.0
+        self.last_wait_n = wait_n
         return out
+
+    def frame_stats(self) -> dict:
+        """Aggregates for the historical panel (computed during vehicles())."""
+        tt_mean = (sum(self._tt) / len(self._tt)) if self._tt else None
+        return {
+            "co2": round(self.last_co2 / 1000.0, 2),        # g/s fleet total
+            "wait": round(self.last_wait_mean, 1),          # s, mean of waiting vehicles
+            "wait_n": self.last_wait_n,                     # vehicles currently waiting
+            "tt": round(tt_mean, 1) if tt_mean is not None else None,   # s, recent arrivals
+            "arrived": self._arrived_total,
+        }
 
     def _vehicles_polled(self, netgeo) -> list[dict]:
         """Old per-vehicle polling path (used only if subscriptions are empty)."""
@@ -143,6 +179,31 @@ class SumoBridge:
                 "type": vtype, "len": length, "wid": width,
                 "edge": conn.vehicle.getRoadID(vid),
             })
+        return out
+
+    def vehicle_details(self, vid: str) -> dict:
+        """Extended per-vehicle stats for the right-click inspector. Each query
+        is guarded — not every measure exists in every SUMO build/vehicle."""
+        v = self.conn.vehicle
+        out: dict = {"id": vid}
+        probes = {
+            "co2": lambda: v.getCO2Emission(vid),              # mg/s
+            "fuel": lambda: v.getFuelConsumption(vid),         # mg/s (ml/s in old SUMO)
+            "noise": lambda: v.getNoiseEmission(vid),          # dB(A)
+            "waiting": lambda: v.getWaitingTime(vid),          # s stopped (current)
+            "waiting_acc": lambda: v.getAccumulatedWaitingTime(vid),
+            "timeloss": lambda: v.getTimeLoss(vid),            # s lost vs. free flow
+            "distance": lambda: v.getDistance(vid),            # m driven since depart
+            "lane": lambda: v.getLaneID(vid),
+            "route_index": lambda: v.getRouteIndex(vid),
+            "route_edges": lambda: len(v.getRoute(vid)),
+        }
+        for key, fn in probes.items():
+            try:
+                out[key] = fn()
+            except Exception:
+                pass
+        out["gone"] = len(out) <= 2   # only id (+gone) -> vehicle left the run
         return out
 
     def trafficlights(self) -> dict:

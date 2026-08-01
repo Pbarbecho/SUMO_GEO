@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections import Counter
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -149,6 +150,14 @@ async def ws_live(ws: WebSocket):
                     paused = False
                 elif action == "speed":
                     period = 1.0 / max(float(cmd.get("fps", settings.max_fps)), 0.1)
+                elif action == "inspect":
+                    # extended SUMO stats for one vehicle (right-click inspector)
+                    vid = str(cmd.get("id", ""))
+                    try:
+                        details = bridge.vehicle_details(vid)
+                    except Exception:
+                        details = {"id": vid, "gone": True}
+                    await ws.send_json({"type": "inspect", **details})
 
             if paused:
                 await asyncio.sleep(0.05)
@@ -156,6 +165,8 @@ async def ws_live(ws: WebSocket):
 
             t = bridge.step()
             vehs = bridge.vehicles(netgeo)
+            stats = bridge.frame_stats()
+            stats["types"] = dict(Counter(v["type"] for v in vehs))
             await ws.send_json({
                 "type": "frame",
                 "t": round(t, 1),
@@ -163,6 +174,7 @@ async def ws_live(ws: WebSocket):
                 "edges": edge_estimation(bridge.conn, netgeo,
                                          (v["edge"] for v in vehs)),
                 "tls": bridge.trafficlights(),
+                "stats": stats,
             })
 
             if bridge.min_expected_number() <= 0:

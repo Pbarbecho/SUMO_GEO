@@ -13,6 +13,31 @@
 
   <div id="popup"></div>
 
+  <div id="histpanel">
+    <h1>Históricos</h1>
+    <div class="h-block">
+      <div class="h-title">Vehículos <b id="h-veh-now">0</b></div>
+      <canvas id="h-veh" width="236" height="52"></canvas>
+      <div class="h-legend"><i style="background:#4da3ff"></i>autos <i style="background:#fa9614"></i>buses</div>
+    </div>
+    <div class="h-block">
+      <div class="h-title">CO₂ flota <b id="h-co2-now">0 g/s</b></div>
+      <canvas id="h-co2" width="236" height="52"></canvas>
+    </div>
+    <div class="h-block">
+      <div class="h-title">Tiempo de viaje medio <b id="h-tt-now">– s</b></div>
+      <canvas id="h-tt" width="236" height="52"></canvas>
+    </div>
+    <div class="h-block">
+      <div class="h-title">Espera en semáforos <b id="h-wait-now">– s</b></div>
+      <canvas id="h-wait" width="236" height="52"></canvas>
+    </div>
+    <div class="h-block">
+      <div class="h-title">Por tipo (ahora)</div>
+      <div id="h-types"></div>
+    </div>
+  </div>
+
   <div id="pantilt-wrap">
     <div id="pantilt" class="pad" title="Arrastra: horizontal = giro (pan) · vertical = inclinación (tilt). Doble clic = norte + 3D.">
       <span class="pad-cross"></span>

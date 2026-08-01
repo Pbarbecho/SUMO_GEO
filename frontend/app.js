@@ -644,7 +644,8 @@ function inspectorHtml(info) {
       `Tipo: <b>${d.type}</b><br>` +
       `Velocidad: <b>${Math.round(d.speed * 3.6)} km/h</b> · Rumbo: <b>${Math.round(d.angle)}°</b><br>` +
       `Dimensiones: <b>${d.len} × ${d.wid} m</b><br>` +
-      `Calle (edge): <b>${d.edge}</b>`;
+      `Calle (edge): <b>${d.edge}</b>` +
+      `<div id="popup-extra" style="margin-top:6px;border-top:1px solid #2c3644;padding-top:6px;opacity:.8">cargando estadísticas…</div>`;
   }
   if (info.layer.id === "network") {
     const p = o.properties, s = edgeStats[p.id];
@@ -675,6 +676,70 @@ function inspectorHtml(info) {
   return null;
 }
 
+// --- historical panel (right side): time series over the simulation ---------
+const HIST_MAX = 720;                 // kept points (~12 min at 1 pt/s)
+const hist = { cars: [], buses: [], co2: [], tt: [], wait: [] };
+let lastHistMs = 0;
+const HIST_UPDATE_MS = 1000;          // sample + redraw at most once per second
+
+function histPush(arr, v) { arr.push(v); if (arr.length > HIST_MAX) arr.shift(); }
+
+function drawSeries(canvasId, seriesArr, colors) {
+  const c = document.getElementById(canvasId);
+  if (!c) return;
+  const ctx = c.getContext("2d");
+  const W = c.width, H = c.height;
+  ctx.clearRect(0, 0, W, H);
+  let max = 1;
+  for (const s of seriesArr) for (const v of s) if (v != null && v > max) max = v;
+  seriesArr.forEach((s, si) => {
+    if (!s.length) return;
+    ctx.strokeStyle = colors[si];
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i < s.length; i++) {
+      const x = 1 + (i / Math.max(s.length - 1, 1)) * (W - 2);
+      const y = H - 3 - ((s[i] == null ? 0 : s[i]) / max) * (H - 8);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.stroke();
+  });
+}
+
+function updateHistory(stats, vehCount) {
+  const now = performance.now();
+  if (now - lastHistMs < HIST_UPDATE_MS) return;
+  lastHistMs = now;
+  const types = stats.types || {};
+  let buses = 0;
+  for (const k in types) if (/bus|coach|tram/i.test(k)) buses += types[k];
+  histPush(hist.cars, vehCount - buses);
+  histPush(hist.buses, buses);
+  histPush(hist.co2, stats.co2 || 0);
+  histPush(hist.tt, stats.tt);
+  histPush(hist.wait, stats.wait || 0);
+  drawSeries("h-veh", [hist.cars, hist.buses], ["#4da3ff", "#fa9614"]);
+  drawSeries("h-co2", [hist.co2], ["#9aa7ff"]);
+  drawSeries("h-tt", [hist.tt], ["#6ee7a0"]);
+  drawSeries("h-wait", [hist.wait], ["#ff8a8a"]);
+  const set = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
+  set("h-veh-now", String(vehCount));
+  set("h-co2-now", `${(stats.co2 || 0).toFixed(1)} g/s`);
+  set("h-tt-now", stats.tt != null ? `${Math.round(stats.tt)} s` : "– s");
+  set("h-wait-now", `${Math.round(stats.wait || 0)} s (${stats.wait_n || 0} veh)`);
+  // current breakdown by vehicle type (top 8 + otros)
+  const el = document.getElementById("h-types");
+  if (el) {
+    const entries = Object.entries(types).sort((a, b) => b[1] - a[1]);
+    const top = entries.slice(0, 8);
+    const rest = entries.slice(8).reduce((s, e) => s + e[1], 0);
+    el.innerHTML = top.map(([k, n]) => `${k}<b>${n}</b><br>`).join("")
+      + (rest ? `otros<b>${rest}</b>` : "");
+  }
+}
+
+let pendingInspect = null;   // vehicle id whose extended stats we're waiting for
+
 function setupInspector() {
   const popup = document.getElementById("popup");
   const container = map.getCanvasContainer();
@@ -686,14 +751,37 @@ function setupInspector() {
       x: e.clientX - rect.left, y: e.clientY - rect.top, radius: 8,
     });
     const html = info && info.object ? inspectorHtml(info) : null;
-    if (!html) { popup.style.display = "none"; return; }
+    if (!html) { popup.style.display = "none"; pendingInspect = null; return; }
     popup.innerHTML = html;
     popup.style.display = "block";
     popup.style.left = Math.min(e.clientX + 12, window.innerWidth - 290) + "px";
-    popup.style.top = Math.min(e.clientY + 12, window.innerHeight - 190) + "px";
+    popup.style.top = Math.min(e.clientY + 12, window.innerHeight - 230) + "px";
+    // vehicle? -> ask the backend for the extended SUMO stats over the same WS
+    if (info.layer.id === "vehicles" && info.object.veh) {
+      pendingInspect = info.object.veh.id;
+      send({ cmd: "inspect", id: pendingInspect });
+    } else {
+      pendingInspect = null;
+    }
   });
-  map.on("click", () => { popup.style.display = "none"; });   // click elsewhere closes it
-  map.on("dragstart", () => { popup.style.display = "none"; });
+  map.on("click", () => { popup.style.display = "none"; pendingInspect = null; });
+  map.on("dragstart", () => { popup.style.display = "none"; pendingInspect = null; });
+}
+
+// fill in the popup when the extended stats arrive from the backend
+function applyInspect(msg) {
+  const extra = document.getElementById("popup-extra");
+  if (!extra || msg.id !== pendingInspect) return;
+  if (msg.gone) { extra.textContent = "El vehículo salió de la simulación"; return; }
+  const f = (x, d = 1) => (x == null ? "–" : Number(x).toFixed(d));
+  extra.style.opacity = "1";
+  extra.innerHTML =
+    `CO₂: <b>${f(msg.co2 / 1000, 2)} g/s</b> · Ruido: <b>${f(msg.noise)} dB</b><br>` +
+    `Combustible: <b>${f(msg.fuel, 1)} mg/s</b><br>` +
+    `Espera: <b>${f(msg.waiting, 0)} s</b> (acum. <b>${f(msg.waiting_acc, 0)} s</b>)<br>` +
+    `Retraso vs. flujo libre: <b>${f(msg.timeloss, 0)} s</b><br>` +
+    `Recorrido: <b>${f((msg.distance || 0) / 1000, 2)} km</b> · Carril: <b>${msg.lane || "–"}</b><br>` +
+    `Ruta: tramo <b>${(msg.route_index ?? 0) + 1} / ${msg.route_edges ?? "–"}</b>`;
 }
 
 // --- WebSocket live stream --------------------------------------------------
@@ -724,9 +812,12 @@ function connect() {
         losStamp++; lastLosMs = now;
       }
       tlState = msg.tls || {};
+      if (msg.stats) updateHistory(msg.stats, vehicles.length);
       els.vehCount.textContent = vehicles.length;
       els.simTime.textContent = msg.t;
       refreshLayers();
+    } else if (msg.type === "inspect") {
+      applyInspect(msg);
     } else if (msg.type === "end") {
       els.conn.textContent = "simulación finalizada";
     } else if (msg.type === "error") {
@@ -849,15 +940,15 @@ function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
 
-// --- auto-hide the control panel: collapses to its title bar when the pointer
-//     leaves, expands on hover (shown briefly on load so the controls are found)
-(() => {
-  const p = document.getElementById("panel");
-  if (!p) return;
+// --- auto-hide panels: collapse to their title bar when the pointer leaves,
+//     expand on hover (shown briefly on load so the controls are found)
+for (const id of ["panel", "histpanel"]) {
+  const p = document.getElementById(id);
+  if (!p) continue;
   let t = null;
   p.addEventListener("mouseenter", () => { clearTimeout(t); p.classList.remove("collapsed"); });
   p.addEventListener("mouseleave", () => { clearTimeout(t); t = setTimeout(() => p.classList.add("collapsed"), 600); });
   setTimeout(() => p.classList.add("collapsed"), 2500);
-})();
+}
 
 boot().catch((e) => { els.conn.textContent = "error: " + e.message; });
