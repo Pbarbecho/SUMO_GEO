@@ -13,6 +13,8 @@
 
   <div id="popup"></div>
 
+  <button id="btn-zen" title="Ocultar / mostrar todos los paneles (modo presentación)">⛶</button>
+
   <div id="histpanel">
     <h1>Históricos</h1>
     <div class="h-block">
@@ -67,6 +69,7 @@
     </button>
   </div>
 
+  <div id="left-col">
   <div id="panel">
     <h1>SUMO&nbsp;·&nbsp;GEO</h1>
     <div class="row">
@@ -122,6 +125,40 @@
       </div>
     </div>
   </div>
+
+  <div id="replay-panel">
+    <h1>Replay&nbsp;V2X</h1>
+    <div class="row">
+      <button id="btn-replay" title="Reproducir una corrida grabada (.pcap de VaN3Twin) con el intercambio de mensajes V2X">🎞 Replay pcap</button>
+    </div>
+    <div class="row" id="replay-bar" style="display:none">
+      <input id="rp-seek" type="range" min="0" max="100" step="0.5" value="0" style="flex:1" />
+      <span id="rp-time" style="font-size:11px;white-space:nowrap">0s</span>
+    </div>
+    <div class="row" id="replay-step-row" style="display:none">
+      <button id="rp-back" class="step-btn" title="Paso atrás: retrocede un frame y pausa">⏮</button>
+      <button id="rp-play" class="step-btn" title="Reproducir / pausar el replay">⏸</button>
+      <button id="rp-step" class="step-btn" title="Paso adelante: avanza un frame y pausa; los mensajes del paso quedan fijos para inspeccionarlos">⏭</button>
+      <select id="veh-filter" title="Mostrar solo los mensajes emitidos por un vehículo" style="flex:1">
+        <option value="">All</option>
+      </select>
+    </div>
+    <label class="row" id="row-msgs" style="display:none">
+      <input id="toggle-msgs" type="checkbox" checked /> Mensajes V2X
+    </label>
+    <div class="row" id="row-msg-filter" style="display:none">
+      <label><input id="f-cam" type="checkbox" checked /> <span style="color:#4da3ff">CAM</span></label>
+      <label><input id="f-cpm" type="checkbox" checked /> <span style="color:#37c871">CPM</span></label>
+      <label><input id="f-denm" type="checkbox" checked /> <span style="color:#ff5347">DENM</span></label>
+      <label title="Etiqueta de distancia (y RSSI si hay signal-rx.csv) sobre cada enlace"><input id="toggle-arc-lbl" type="checkbox" checked /> m/dBm</label>
+    </div>
+  </div>
+
+  <div id="phy-panel" style="display:none">
+    <h1>PHY&nbsp;802.11p</h1>
+    <div id="phy-body" style="font-size:12px;line-height:1.7">cargando…</div>
+  </div>
+  </div><!-- /left-col -->
 
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/deck.gl@9.0.38/dist.min.js"></script>

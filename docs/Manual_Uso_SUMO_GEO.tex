@@ -1,0 +1,414 @@
+% !TEX program = pdflatex
+% Manual de uso de SUMO-GEO — compilar con: pdflatex Manual_Uso_SUMO_GEO.tex
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=2.4cm]{geometry}
+% (sin babel: este texlive no trae spanish.ldf; títulos en español a mano)
+\AtBeginDocument{%
+  \renewcommand{\contentsname}{Índice}%
+  \renewcommand{\tablename}{Tabla}%
+  \renewcommand{\figurename}{Figura}%
+}
+\usepackage{lmodern}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{parskip}
+
+\definecolor{fondo}{RGB}{245,246,248}
+\definecolor{borde}{RGB}{200,205,215}
+\definecolor{cmdcolor}{RGB}{30,60,110}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{fondo},
+  frame=single, rulecolor=\color{borde},
+  breaklines=true, breakatwhitespace=true,
+  columns=fullflexible, keepspaces=true,
+  literate={á}{{\'a}}1 {é}{{\'e}}1 {í}{{\'i}}1 {ó}{{\'o}}1 {ú}{{\'u}}1 {ñ}{{\~n}}1 {→}{{$\rightarrow$}}1 {≥}{{$\geq$}}1 {·}{{$\cdot$}}1 {°}{{$^\circ$}}1
+}
+
+\hypersetup{colorlinks=true, linkcolor=cmdcolor, urlcolor=cmdcolor}
+
+\title{\textbf{SUMO-GEO}\\[4pt]\Large Manual de uso\\[6pt]
+\large Simulación de movilidad SUMO en el navegador con MapLibre GL JS + deck.gl}
+\author{Universidad de Cuenca --- Ecuador\\
+\small\url{https://github.com/Pbarbecho/SUMO_GEO}}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%=====================================================================
+\section{Introducción}
+
+\textbf{SUMO-GEO} es una aplicación web para ejecutar y visualizar simulaciones
+de movilidad de \textbf{SUMO} directamente en el navegador, sin instalar ningún
+software en el cliente. Ofrece edificios 3D, estimación de tráfico en tiempo
+real (niveles de servicio A--F), semáforos sincronizados con las fases de SUMO,
+vehículos 3D procedurales, un inspector con clic derecho y un panel de
+estadísticas históricas.
+
+\subsection{Arquitectura}
+
+\begin{lstlisting}
+SUMO (Docker) --TraCI--> Backend FastAPI --REST------> red + edificios + semaforos (GeoJSON)
+ (suscripciones)                        --WebSocket--> vehiculos + LOS + fases + estadisticas
+                                                        --> MapLibre GL JS + deck.gl (navegador)
+\end{lstlisting}
+
+\begin{itemize}
+  \item \textbf{Simulación}: SUMO con TraCI. Cada pestaña del navegador lanza su
+        propia simulación (conexiones TraCI con etiqueta única).
+  \item \textbf{Backend}: FastAPI (Python). Convierte la red y los polígonos a
+        GeoJSON, calcula el LOS por arista y transmite los fotogramas por WebSocket.
+  \item \textbf{Frontend}: SPA estática con MapLibre GL JS (mapa base y edificios)
+        y deck.gl (calles, vehículos, semáforos).
+  \item \textbf{Entrega}: nginx sirve la SPA y hace de proxy inverso de
+        \texttt{/api} y \texttt{/ws} (mismo origen, sin CORS).
+\end{itemize}
+
+%=====================================================================
+\section{Requisitos previos}
+
+\begin{itemize}
+  \item \textbf{Docker} y \textbf{Docker Compose} (Docker Desktop en macOS/Windows,
+        o \texttt{docker} + plugin \texttt{compose} en Linux).
+  \item \textbf{Git} para clonar el repositorio.
+  \item Conexión a internet la primera vez (descarga de imágenes Docker y teselas
+        del mapa base).
+  \item Opcional, solo para \emph{generar mapas nuevos} en el host:
+        Python~3 con \texttt{pip3 install eclipse-sumo sumolib}.
+\end{itemize}
+
+No es necesario instalar SUMO en el equipo: el contenedor del backend lo incluye.
+
+%=====================================================================
+\section{Lanzar una simulación desde cero}
+
+\subsection{Paso 1 --- Clonar el repositorio}
+
+\begin{lstlisting}
+git clone https://github.com/Pbarbecho/SUMO_GEO.git
+cd SUMO_GEO
+\end{lstlisting}
+
+\subsection{Paso 2 --- Construir y levantar los contenedores}
+
+\begin{lstlisting}
+docker compose up --build
+\end{lstlisting}
+
+La primera ejecución tarda unos minutos (construye la imagen del backend e
+instala SUMO). Las siguientes son inmediatas.
+
+\subsection{Paso 3 --- Abrir la aplicación}
+
+\begin{itemize}
+  \item Frontend: \url{http://localhost:8082}
+  \item Comprobación del backend: \url{http://localhost:8000/api/health}
+\end{itemize}
+
+Al abrir la página se conecta el WebSocket, arranca SUMO dentro del contenedor y
+los vehículos comienzan a circular. Si se cambió el código o la configuración,
+recargar con \emph{hard refresh}: \texttt{Cmd+Shift+R} (macOS) o
+\texttt{Ctrl+Shift+R} (Windows/Linux).
+
+\subsection{Paso 4 --- Detener}
+
+\begin{lstlisting}
+docker compose down
+\end{lstlisting}
+
+\subsection{Volver a lanzar la aplicación (segunda vez y siguientes)}
+
+\textbf{No} hace falta \texttt{--build} en cada arranque. La imagen del backend
+ya está construida y los mapas y el frontend se montan por volumen, así que
+basta con:
+
+\begin{lstlisting}
+docker compose up -d
+\end{lstlisting}
+
+La regla práctica es la siguiente:
+
+\begin{longtable}{@{}p{7.6cm}p{6.7cm}@{}}
+\toprule
+\textbf{Qué cambió desde la última vez} & \textbf{Comando necesario} \\
+\midrule
+Nada (solo volver a usar la herramienta) & \texttt{docker compose up -d} \\
+Frontend (\texttt{frontend/}: HTML, JS, CSS) & Nada que reconstruir: recargar el
+  navegador con \texttt{Cmd/Ctrl+Shift+R} \\
+Mapas o demanda (\texttt{sumo/}, \texttt{mapa/}) & \texttt{docker compose up -d}
+  y recargar el navegador (cada conexión lanza un SUMO nuevo que ya lee los
+  archivos actualizados) \\
+Variables \texttt{APP\_*} en \texttt{docker-compose.yml} &
+  \texttt{docker compose up -d} (recrea el contenedor con el nuevo entorno) \\
+Código del backend (\texttt{backend/}: Python, \texttt{requirements.txt},
+  \texttt{Dockerfile}) & \texttt{docker compose up -d --build} \\
+\bottomrule
+\end{longtable}
+
+En resumen: \texttt{--build} \emph{solo} cuando se toca la carpeta
+\texttt{backend/}. Usarlo de más no rompe nada (Docker aprovecha la caché),
+solo tarda unos segundos extra.
+
+%=====================================================================
+\section{Comandos de Docker explicados}
+
+\subsection{\texttt{docker compose up --build}}
+
+\begin{longtable}{@{}p{4.2cm}p{10.5cm}@{}}
+\toprule
+\textbf{Elemento} & \textbf{Significado} \\
+\midrule
+\texttt{docker compose} & Orquesta los servicios definidos en
+  \texttt{docker-compose.yml} (aquí: \texttt{backend} y \texttt{frontend}). \\
+\texttt{up} & Crea y arranca los contenedores, redes y volúmenes. Con la
+  terminal abierta muestra los logs de ambos servicios en vivo. \\
+\texttt{--build} & Fuerza la reconstrucción de la imagen del backend antes de
+  arrancar. \textbf{Necesario} tras modificar \texttt{backend/} (código Python,
+  \texttt{requirements.txt}, \texttt{Dockerfile}). No hace falta si solo cambian
+  archivos montados por volumen (frontend, mapas, \texttt{docker-compose.yml}). \\
+\texttt{-d} (opcional) & \emph{Detached}: arranca en segundo plano y devuelve la
+  terminal. Ejemplo: \texttt{docker compose up -d --build}. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Comandos habituales}
+
+\begin{longtable}{@{}p{6.4cm}p{8.3cm}@{}}
+\toprule
+\textbf{Comando} & \textbf{Uso} \\
+\midrule
+\texttt{docker compose up -d} & Arrancar en segundo plano (sin reconstruir). \\
+\texttt{docker compose down} & Parar y eliminar los contenedores. \\
+\texttt{docker compose restart backend} & Reiniciar solo el backend (por ejemplo
+  tras cambiar variables de entorno no requiere \texttt{--build}, pero sí
+  \texttt{up -d} para releer el YAML). \\
+\texttt{docker compose logs -f} & Seguir los logs de todos los servicios
+  (\texttt{Ctrl+C} para salir). \\
+\texttt{docker compose logs -f backend} & Solo los logs del backend: aquí se ven
+  los arranques de SUMO y los errores de TraCI. \\
+\texttt{docker compose logs --tail=100 backend} & Últimas 100 líneas sin seguir. \\
+\texttt{docker compose ps} & Estado de los servicios y puertos publicados. \\
+\texttt{docker compose build --no-cache backend} & Reconstrucción limpia si la
+  imagen quedó en mal estado. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Servicios y puertos}
+
+\begin{longtable}{@{}llll@{}}
+\toprule
+\textbf{Servicio} & \textbf{Imagen} & \textbf{Puerto host} & \textbf{Función} \\
+\midrule
+\texttt{backend}  & construida de \texttt{backend/Dockerfile} & 8000 & FastAPI + SUMO \\
+\texttt{frontend} & \texttt{nginx:1.27-alpine} & 8082 & SPA + proxy \texttt{/api}, \texttt{/ws} \\
+\bottomrule
+\end{longtable}
+
+%=====================================================================
+\section{Ubicación de los archivos de mapas de SUMO}
+
+El repositorio incluye dos familias de escenarios. Los directorios del host se
+montan \emph{de solo lectura} dentro del contenedor del backend:
+
+\begin{longtable}{@{}lll@{}}
+\toprule
+\textbf{Directorio (host)} & \textbf{Montaje (contenedor)} & \textbf{Contenido} \\
+\midrule
+\texttt{./sumo} & \texttt{/sumo} & Centro de Cuenca (OSM) + demo sintética \\
+\texttt{./mapa} & \texttt{/mapa} & Red metropolitana de Cuenca completa \\
+\bottomrule
+\end{longtable}
+
+Por eso las rutas de las variables \texttt{APP\_*} empiezan por \texttt{/sumo/}
+o \texttt{/mapa/}: son rutas \emph{dentro del contenedor}.
+
+\subsection{\texttt{mapa/} --- Red metropolitana (escenario activo por defecto)}
+
+\begin{longtable}{@{}p{5.6cm}p{8.9cm}@{}}
+\toprule
+\textbf{Archivo} & \textbf{Descripción} \\
+\midrule
+\texttt{network.net.xml} & Red vial de toda Cuenca ($\sim$93\,MB, 26$\times$19\,km,
+  337 intersecciones semaforizadas). \textbf{Excluida de git} por tamaño; se
+  regenera con \texttt{scripts/build\_city.sh}. \\
+\texttt{metro\_low.sumocfg} / \texttt{\_mid} / \texttt{\_high} & Configuración
+  SUMO de cada nivel de tráfico (Bajo / Medio / Alto). \\
+\texttt{metro\_low.rou.xml} / \texttt{\_mid} / \texttt{\_high} & Demanda de 24\,h
+  por nivel (6\,000 / 15\,000 / 30\,000 viajes) con perfil horario realista y
+  orígenes/destinos en la componente fuertemente conexa (sin avisos
+  \emph{no route}). \\
+\texttt{vtypes.add.xml} & Flota de turismos (24 modelos reales: Chevrolet,
+  Toyota, Kia, \ldots) con dimensiones y masas. \\
+\texttt{transit.add.xml} & Tipo de vehículo \texttt{bus}. \\
+\bottomrule
+\end{longtable}
+
+\subsection{\texttt{sumo/} --- Centro de Cuenca y demo}
+
+\begin{longtable}{@{}p{5.6cm}p{8.9cm}@{}}
+\toprule
+\textbf{Archivo} & \textbf{Descripción} \\
+\midrule
+\texttt{cuenca.net.xml} & Red del centro ($\sim$1$\times$1\,km) importada de OSM,
+  proyectada (se georreferencia exactamente sobre el mapa). \\
+\texttt{cuenca.poly.xml} & Huellas de edificios con altura real (etiquetas OSM)
+  para la extrusión 3D. \\
+\texttt{cuenca.sumocfg} & Escenario demo corto (0--600\,s). \\
+\texttt{cuenca\_\{low,mid,high\}.*} & Niveles de 24\,h para el centro. \\
+\texttt{cuenca\_bbox.osm.xml} & Extracto OSM original de la zona. \\
+\texttt{grid.net.xml}, \texttt{buildings.poly.xml}, \texttt{demo.sumocfg} &
+  Demo sintética (malla 6$\times$6) generada sin internet por
+  \texttt{scripts/generate\_scenario.sh}. \\
+\texttt{vtypes.add.xml}, \texttt{transit.add.xml} & Copia de la flota para esta
+  familia. \\
+\bottomrule
+\end{longtable}
+
+\textbf{Para añadir un mapa propio}: colocar \texttt{.net.xml},
+\texttt{.poly.xml} (opcional) y \texttt{.sumocfg} en \texttt{sumo/} (o
+\texttt{mapa/}) y apuntar \texttt{APP\_SUMO\_CONFIG} al \texttt{.sumocfg}. Los
+semáforos, la red y los edificios se derivan automáticamente al arrancar el
+backend; la red debe construirse con \texttt{netconvert --tls.guess-signals}
+para que existan semáforos.
+
+%=====================================================================
+\section{Configuración: variables de entorno del backend}
+
+Se definen en la sección \texttt{environment} del servicio \texttt{backend} en
+\texttt{docker-compose.yml}. Tras cambiar una variable:
+\texttt{docker compose up -d} (releer YAML) y refrescar el navegador.
+
+\begin{longtable}{@{}p{5.3cm}p{2.9cm}p{6.2cm}@{}}
+\toprule
+\textbf{Variable} & \textbf{Valor por defecto} & \textbf{Significado} \\
+\midrule
+\texttt{APP\_SUMO\_MODE} & \texttt{managed} & \texttt{managed}: el backend lanza
+  SUMO. \texttt{remote}: se conecta a un servidor TraCI externo. \\
+\texttt{APP\_SUMO\_CONFIG} & \texttt{/mapa/metro\_mid.sumocfg} & Escenario base:
+  de él se leen red, edificios y semáforos al arrancar. \\
+\texttt{APP\_SUMO\_CONFIG\_TEMPLATE} & \texttt{/mapa/metro\_\{level\}.sumocfg} &
+  Plantilla del selector Bajo/Medio/Alto; \texttt{\{level\}} se sustituye por
+  \texttt{low}/\texttt{mid}/\texttt{high}. \\
+\texttt{APP\_SIM\_BEGIN} & \texttt{28800} & Segundo simulado de arranque
+  (28\,800 = 08:00, hora punta). \\
+\texttt{APP\_VIEW\_LON} / \texttt{APP\_VIEW\_LAT} & \texttt{-79.004} /
+  \texttt{-2.902} & Centro inicial de la vista (útil cuando la demanda se
+  concentra en una zona). \\
+\texttt{APP\_NET\_FILE} / \texttt{APP\_POLY\_FILE} & --- & Sustituyen la red o
+  los edificios del \texttt{.sumocfg} (p.\,ej.\ añadir \texttt{poly} a un
+  escenario que no lo lista). \\
+\texttt{APP\_ORIGIN\_LON} / \texttt{APP\_ORIGIN\_LAT} & Cuenca & Ancla ENU para
+  redes sintéticas sin proyección (la demo \emph{grid}). \\
+\texttt{APP\_STEP\_LENGTH} & \texttt{1.0} & Segundos por paso de simulación. \\
+\texttt{APP\_MAX\_FPS} & \texttt{10} & Tope de fotogramas por segundo del
+  WebSocket. \\
+\texttt{APP\_SUMO\_HOST} / \texttt{APP\_SUMO\_PORT} & \texttt{sumo} /
+  \texttt{8813} & Servidor TraCI en modo \texttt{remote}. \\
+\texttt{APP\_USE\_LIBSUMO} & \texttt{false} & Usar libsumo en proceso si está
+  disponible. \\
+\texttt{APP\_CORS\_ORIGINS} & \texttt{*} & Orígenes CORS permitidos. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Cambiar de escenario}
+
+En \texttt{docker-compose.yml} hay un bloque marcado con el escenario
+\emph{activo} (red metropolitana) y, comentada, la alternativa del centro con
+edificios 3D. Para cambiar: comentar unas líneas, descomentar las otras y
+ejecutar \texttt{docker compose up -d}.
+
+%=====================================================================
+\section{Uso de la interfaz}
+
+\subsection{Panel izquierdo (controles; se pliega solo, pasar el cursor para abrir)}
+\begin{itemize}
+  \item \textbf{Pausar / Reiniciar} la simulación.
+  \item \textbf{Escenario}: nivel de tráfico Bajo / Medio / Alto (reconecta).
+  \item \textbf{Velocidad}: 1--30 fps.
+  \item \textbf{Edificios}, \textbf{Congestión (LOS)}, \textbf{Semáforos},
+        \textbf{PoI}: capas visibles.
+  \item \textbf{Calles concurridas} + umbral $\geq N$ veh: pines flotantes con el
+        conteo en vivo.
+\end{itemize}
+
+\subsection{Panel derecho: Históricos}
+Series temporales con eje de hora simulada: vehículos (autos/buses), CO$_2$ de la
+flota, tiempo de viaje medio, espera en semáforos y desglose por tipo.
+
+\subsection{Barra superior y cámara}
+Zoom, órbita automática, alternador 2D/3D y presets de luz (amanecer / día /
+atardecer / noche). El \emph{pad} \textbf{Pan-Tilt} (esquina inferior izquierda)
+controla giro (horizontal) e inclinación (vertical); doble clic = norte + 3D.
+
+\subsection{Inspector con clic derecho}
+Clic derecho sobre un \textbf{vehículo} (tipo, velocidad, CO$_2$, espera,
+retraso, distancia, carril, progreso de ruta), una \textbf{calle} (carriles,
+límite, densidad, LOS, ocupación) o un \textbf{semáforo} (estado, tipo de
+soporte). Los turismos de la flota son eléctricos (\texttt{evehicle}): su
+CO$_2$ es 0; los buses sí emiten.
+
+%=====================================================================
+\section{Generación de mapas y demanda (avanzado)}
+
+En el host, con \texttt{pip3 install eclipse-sumo sumolib}:
+
+\begin{lstlisting}
+# Importar una ciudad real de OSM (bbox = W,S,E,N):
+./scripts/build_city.sh "-79.010,-2.903,-79.000,-2.893" cuenca
+
+# Generar demanda de 24 h en 3 niveles (con duarouter):
+python3 scripts/gen_traffic.py \
+  --net sumo/cuenca.net.xml --types sumo/vtypes.add.xml \
+  --transit sumo/transit.add.xml --outdir sumo --prefix cuenca \
+  --low 3000 --mid 8000 --high 18000 --bus-share 0.05
+
+# Variante para redes grandes (sin duarouter, sin avisos "no route"):
+python3 scripts/gen_traffic.py ... --no-duarouter --connected
+\end{lstlisting}
+
+Opciones útiles de \texttt{gen\_traffic.py}: \texttt{--center-bbox="W,S,E,N"}
+(concentrar la demanda en una zona), \texttt{--levels low,mid} (regenerar un
+subconjunto), \texttt{--seed} (reproducibilidad).
+
+%=====================================================================
+\section{Solución de problemas}
+
+\begin{longtable}{@{}p{6.2cm}p{8.3cm}@{}}
+\toprule
+\textbf{Síntoma} & \textbf{Solución} \\
+\midrule
+La página muestra ``esperando al backend'' & El backend aún carga la red (la
+  metropolitana tarda unos segundos) o falló: revisar
+  \texttt{docker compose logs -f backend}. \\
+Cambios de código no se reflejan & Backend: \texttt{docker compose up -d --build}.
+  Frontend: basta \emph{hard refresh} (\texttt{Cmd/Ctrl+Shift+R}). \\
+``desconectado'' permanente & Ver logs del backend; si SUMO no arranca,
+  verificar que \texttt{APP\_SUMO\_CONFIG} apunta a un \texttt{.sumocfg}
+  existente dentro de \texttt{/sumo} o \texttt{/mapa}. \\
+Puerto 8082 ocupado (\emph{port is already allocated}) & Ver qué contenedor lo usa con
+  \texttt{docker ps -a | grep 8082}, detenerlo (\texttt{docker stop} +
+  \texttt{docker rm}) o cambiar el mapeo \texttt{"8082:80"} del servicio
+  \texttt{frontend} en \texttt{docker-compose.yml}. Cuidado: el backend publica
+  el 8000 --- no asignar el mismo puerto a ambos servicios. \\
+Sin semáforos en un mapa propio & La red no los trae: reconstruir con
+  \texttt{netconvert --tls.guess-signals}. \\
+\bottomrule
+\end{longtable}
+
+\vfill
+\begin{center}
+\small SUMO-GEO --- código MIT. SUMO es EPL-2.0; MapLibre GL JS y deck.gl son BSD-3/MIT.
+\end{center}
+
+\end{document}

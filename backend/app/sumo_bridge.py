@@ -56,7 +56,27 @@ class SumoBridge:
         client = self._import_client()
         if settings.sumo_mode == "remote" and not self._libsumo:
             # Connect to an already-running SUMO server (your existing container).
-            client.init(host=settings.sumo_host, port=settings.sumo_port)
+            # Con sumo_port_scan > 0 se prueban también los puertos siguientes:
+            # el TraCI de ns-3 (GetFreePort) corre el puerto si el base está
+            # ocupado o en TIME_WAIT tras la corrida anterior.
+            last_exc: Exception | None = None
+            for port in range(settings.sumo_port,
+                              settings.sumo_port + max(settings.sumo_port_scan, 0) + 1):
+                try:
+                    client.init(host=settings.sumo_host, port=port, numRetries=1)
+                    if port != settings.sumo_port:
+                        print(f"[sumo_bridge] SUMO respondió en {port} "
+                              f"(base {settings.sumo_port})", flush=True)
+                    last_exc = None
+                    break
+                except Exception as exc:  # noqa: BLE001 - probar el siguiente puerto
+                    last_exc = exc
+            if last_exc is not None:
+                raise last_exc
+            if settings.sumo_order:
+                # SUMO multi-cliente (--num-clients N): cada cliente debe declarar
+                # su orden antes del primer simulationStep (VaN3Twin es el 1).
+                client.setOrder(settings.sumo_order)
             self.conn = client
         else:
             from sumolib import checkBinary
@@ -86,7 +106,15 @@ class SumoBridge:
             pass
 
     def step(self) -> float:
-        self.conn.simulationStep()
+        if settings.sumo_mode == "remote" and settings.sumo_order:
+            # Multi-cliente con ns-3 (VaN3Twin): pedir un objetivo ABSOLUTO grueso
+            # (t_actual + step_length). ns-3 avanza con sus pasos finos y marca el
+            # ritmo; si pidiéramos "un paso" por frame, ns-3 quedaría esclavo del
+            # visor (validado empíricamente — ver GUIA_INTEGRACION_SUMO_GEO.md).
+            self.conn.simulationStep(
+                self.conn.simulation.getTime() + settings.step_length)
+        else:
+            self.conn.simulationStep()
         now = self.conn.simulation.getTime()
         try:                                    # keep the subscription set complete
             for vid in self.conn.simulation.getDepartedIDList():

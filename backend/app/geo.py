@@ -56,8 +56,13 @@ class NetworkGeo:
 
     def __init__(self, net_path: str):
         self.net = sumolib.net.readNet(net_path)
+        # No usar net.hasGeoProj(): no existe en sumolib <= 1.12 (backend
+        # van3twin) y el except lo convertía en False aunque la red tuviera
+        # proyección real (síntoma: red de Turín dibujada sobre Cuenca).
+        # Probar la conversión directamente cubre todas las versiones.
         try:
-            self.has_geo = self.net.hasGeoProj()
+            self.net.convertXY2LonLat(0.0, 0.0)
+            self.has_geo = True
         except Exception:
             self.has_geo = False
 

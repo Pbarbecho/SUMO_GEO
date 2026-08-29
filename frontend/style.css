@@ -5,17 +5,28 @@ html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, Seg
 /* scene tint used by the light presets (dusk/night wash); never blocks clicks */
 #tint { position: absolute; inset: 0; z-index: 2; pointer-events: none; transition: background .6s ease; }
 
-#panel {
+#left-col {
   position: absolute; top: 12px; left: 12px; z-index: 5;
+  display: flex; flex-direction: column; gap: 12px;
+  max-height: 95vh;
+}
+#panel, #replay-panel, #phy-panel {
   width: 280px; padding: 14px 16px; border-radius: 12px;
   background: var(--panel); color: var(--fg);
   backdrop-filter: blur(6px); box-shadow: 0 6px 24px #0008;
-  max-height: 82vh; overflow-y: auto; overflow-x: hidden;
+  overflow-y: auto; overflow-x: hidden;
   transition: max-height .35s ease;
 }
-#panel.collapsed { max-height: 46px; overflow: hidden; }   /* auto-hidden: only the title bar */
-#panel h1 { margin: 0 0 10px; font-size: 16px; letter-spacing: .5px; }
+#panel { max-height: 60vh; }
+#replay-panel { max-height: 34vh; }
+#phy-panel { max-height: 40vh; }
+#panel.collapsed, #replay-panel.collapsed, #phy-panel.collapsed { max-height: 46px; overflow: hidden; }   /* solo la barra de título */
+#panel h1, #replay-panel h1, #phy-panel h1 { margin: 0 0 10px; font-size: 16px; letter-spacing: .5px; }
 #panel h1::after { content: "☰"; float: right; opacity: .5; font-weight: 400; }
+#replay-panel h1::after { content: "🎞"; float: right; opacity: .6; font-weight: 400; }
+#phy-panel h1::after { content: "📶"; float: right; opacity: .6; font-weight: 400; }
+#phy-body b { color: var(--accent); }
+#phy-body .phy-sep { border-top: 1px solid #2c3644; margin: 6px 0; }
 #fps-val { white-space: nowrap; min-width: 46px; text-align: right; }
 .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 13px; }
 button {
@@ -86,6 +97,47 @@ input[type=range] { flex: 1; accent-color: var(--accent); }
 }
 #popup h3 { margin: 0 0 6px; font-size: 12.5px; color: var(--accent); }
 #popup b { color: #fff; }
+/* popup interactivo (detalle de mensajes V2X): admite ratón para desplazar
+   el contenido ASN.1 largo; el popup rápido del inspector sigue siendo
+   transparente a eventos */
+#popup.interactive { pointer-events: auto; max-width: 400px; }
+#popup.interactive pre {
+  max-height: 300px; overflow: auto; font-size: 10px;
+  margin: 6px 0 0; white-space: pre-wrap; overscroll-behavior: contain;
+}
+.popup-close {
+  float: right; cursor: pointer; opacity: .6; font-weight: 700;
+  margin-left: 8px; user-select: none;
+}
+.popup-close:hover { opacity: 1; }
+.step-btn { flex: 0 0 auto !important; padding: 7px 12px; font-size: 14px; }
+/* capas plegables del popup de mensaje (disección estilo Wireshark) */
+#popup.interactive details { margin: 5px 0 0; }
+#popup.interactive summary {
+  cursor: pointer; color: var(--accent); font-weight: 600;
+  font-size: 11.5px; user-select: none;
+}
+#popup.interactive details pre { max-height: 220px; }
+/* pin de paneles: fija un panel para que no se auto-colapse */
+.pin {
+  float: right; cursor: pointer; margin-left: 8px;
+  opacity: .35; filter: grayscale(1); user-select: none;
+}
+.pin.on { opacity: 1; filter: none; }
+/* modo presentación: botón degradado arriba a la derecha que oculta todos los
+   paneles y controles, dejando solo el mapa y la simulación */
+#btn-zen {
+  position: absolute; top: 14px; right: 14px; z-index: 30;
+  flex: none; width: 32px; height: 32px; padding: 0;
+  border-radius: 8px; font-size: 16px; line-height: 32px; text-align: center;
+  background: var(--panel); color: var(--fg);
+  opacity: .3; transition: opacity .25s ease;
+  box-shadow: 0 4px 14px #0007; backdrop-filter: blur(6px);
+}
+#btn-zen:hover { opacity: 1; }
+body.zen #left-col, body.zen #histpanel,
+body.zen #topbar, body.zen #pantilt-wrap { display: none; }
+body.zen #btn-zen { opacity: .5; }
 
 #stats { margin-top: 12px; font-size: 13px; line-height: 1.7; border-top: 1px solid #2c3644; padding-top: 10px; }
 #veh-count, #sim-time { color: var(--accent); }

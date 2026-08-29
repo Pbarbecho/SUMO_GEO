@@ -36,6 +36,16 @@ class Settings(BaseSettings):
     sumo_config: str = "/sumo/demo.sumocfg"   # path to the .sumocfg (managed mode)
     sumo_host: str = "sumo"                    # TraCI host (remote mode)
     sumo_port: int = 8813                      # TraCI port (remote mode)
+    sumo_order: int = 0        # >0 => TraCI multi-cliente: llamar setOrder(N) al conectar
+    sumo_port_scan: int = 0    # nº de puertos extra a probar tras sumo_port (el TraCI de
+                               # ns-3/VaN3Twin corre el puerto +1 si el anterior está en TIME_WAIT)
+
+    # --- Replay offline (mensajes V2X desde .pcap de VaN3Twin) ---------------
+    # El WS con ?replay=1 reproduce una corrida grabada: movilidad desde los
+    # encabezados GeoNetworking y mensajes CAM/CPM/DENM con contenido ASN.1.
+    replay_dir: str = "/replay"            # carpeta con v2v-*-<n>-0.pcap
+    replay_pattern: str = "*.pcap"
+    asn_dir: str = "/ns3/ns-3-dev/src/automotive/model/ASN1"
     use_libsumo: bool = False                  # use in-process libsumo if available
     step_length: float = 1.0                   # seconds per simulation step
 

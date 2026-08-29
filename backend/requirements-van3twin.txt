@@ -1,0 +1,11 @@
+# Backend en modo "remote" contra el contenedor van3twin (SUMO 1.12.0).
+# Sin eclipse-sumo: no hace falta el binario, solo las librerías puras.
+# Los pines traci/sumolib DEBEN coincidir con el SUMO del contenedor van3twin.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+websockets==14.1
+pydantic-settings>=2.4,<3
+traci==1.12.0
+sumolib==1.12.0
+pyproj>=3.6
+asn1tools>=0.166   # replay offline: decodificar CAM/CPM/DENM (ASN.1 UPER) de los .pcap

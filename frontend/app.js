@@ -34,7 +34,44 @@ const els = {
   light_day: document.getElementById("light-day"),
   light_dusk: document.getElementById("light-dusk"),
   light_night: document.getElementById("light-night"),
+  replayBtn: document.getElementById("btn-replay"),
+  replayBar: document.getElementById("replay-bar"),
+  rpSeek: document.getElementById("rp-seek"),
+  rpTime: document.getElementById("rp-time"),
+  rowMsgs: document.getElementById("row-msgs"),
+  rowMsgFilter: document.getElementById("row-msg-filter"),
+  stepRow: document.getElementById("replay-step-row"),
+  rpStep: document.getElementById("rp-step"),
+  rpBack: document.getElementById("rp-back"),
+  rpPlay: document.getElementById("rp-play"),
+  vehFilter: document.getElementById("veh-filter"),
+  msgsToggle: document.getElementById("toggle-msgs"),
+  fCam: document.getElementById("f-cam"),
+  fCpm: document.getElementById("f-cpm"),
+  fDenm: document.getElementById("f-denm"),
+  arcLbl: document.getElementById("toggle-arc-lbl"),
+  zen: document.getElementById("btn-zen"),
 };
+
+// modo presentación: ocultar todos los paneles (solo mapa + simulación)
+els.zen.onclick = () => document.body.classList.toggle("zen");
+
+// --- replay offline (mensajes V2X desde .pcap de VaN3Twin) -------------------
+let replayMode = false;        // conectar con ?replay=1
+let replayT0 = 0, replayT1 = 0;
+let rpDragging = false;
+let showMsgs = true;
+let showArcLabels = true;      // etiqueta "N m · X dBm" sobre cada enlace
+let selStation = null;         // filtro: solo mensajes emitidos por esta estación
+let msgEvents = [];            // {kind:'tx'|'rx', type, wallT, simT, st, pos, pos2}
+const MSG_TTL = 900;           // ms de vida visual de un evento
+const MSG_COLORS = { CAM: [77, 163, 255], CPM: [55, 200, 113], DENM: [255, 83, 71] };
+function msgFilterOn(type) {
+  if (type === "CAM") return els.fCam.checked;
+  if (type === "CPM") return els.fCpm.checked;
+  if (type === "DENM") return els.fDenm.checked;
+  return true;
+}
 
 let map, overlay, ws;
 let networkGeo = { type: "FeatureCollection", features: [] };
@@ -46,7 +83,61 @@ let edgeMid = {};         // edgeId -> [lon,lat] midpoint (for the busy-street i
 let losStamp = 0;         // bumped when a new LOS snapshot is accepted (throttled)
 let lastLosMs = 0;
 const LOS_UPDATE_MS = 700; // recolouring 34k+ edges every frame is wasteful — throttle it
-let vehicles = [];        // latest frame vehicles
+let vehicles = [];        // latest frame vehicles (interpolados para el render)
+
+// --- interpolación de movimiento entre frames -------------------------------
+// Cada frame del backend avanza APP_STEP_LENGTH seg simulados de golpe (en modo
+// van3twin, 0.5-1 s): sin esto los vehículos "saltan". Entre frame y frame se
+// interpola posición y rumbo a ritmo de requestAnimationFrame.
+const INTERP_MAX_VEH = 1500;   // por encima, refresco directo (escenarios masivos)
+const INTERP_MAX_JUMP = 80;    // m; salto mayor = teletransporte/reinserción -> no interpolar
+let frameVehicles = [];        // último frame recibido (crudo)
+let interpPrev = new Map();    // id -> {lon,lat,angle} dibujados en el frame anterior
+let interpT0 = 0;              // performance.now() del último frame
+let interpPeriod = 100;        // ms entre frames (media móvil)
+
+function angleLerp(a, b, t) {
+  const d = ((b - a + 540) % 360) - 180;      // camino angular más corto
+  return (a + d * t + 360) % 360;
+}
+function metersBetween(lon1, lat1, lon2, lat2) {
+  const kx = 111320 * Math.cos(lat1 * Math.PI / 180);
+  return Math.hypot((lon2 - lon1) * kx, (lat2 - lat1) * 110540);
+}
+// Ritmo del tick adaptado al tamaño de la flota: interpolar 500 vehículos a
+// 60 fps recalcula demasiada geometría; mejor menos ticks pero fluidos.
+function interpMinInterval(n) {
+  if (n <= 150) return 0;      // cada rAF (~60 fps)
+  if (n <= 400) return 33;     // ~30 fps
+  if (n <= 800) return 50;     // ~20 fps
+  return 90;                   // ~11 fps
+}
+let interpLastDraw = 0;
+
+function interpTick() {
+  requestAnimationFrame(interpTick);
+  const now = performance.now();
+  if (now - interpLastDraw < interpMinInterval(frameVehicles.length)) return;
+  const t = interpT0 ? Math.min((now - interpT0) / interpPeriod, 1) : 1;
+  const needVeh = !paused && frameVehicles.length > 0 &&
+    frameVehicles.length <= INTERP_MAX_VEH && t < 1;
+  // animar fade aunque no haya interp.; en modo paso (congelado) no hace falta
+  const needMsg = msgEvents.length > 0 && !(replayMode && paused);
+  if (!needVeh && !needMsg) return;
+  if (needVeh) {
+    vehicles = frameVehicles.map((v) => {
+      const p = interpPrev.get(v.id);
+      if (!p || metersBetween(p.lon, p.lat, v.lon, v.lat) > INTERP_MAX_JUMP) return v;
+      return { ...v,
+        lon: p.lon + (v.lon - p.lon) * t,
+        lat: p.lat + (v.lat - p.lat) * t,
+        angle: angleLerp(p.angle, v.angle, t) };
+    });
+  }
+  interpLastDraw = now;
+  refreshDynamicLayers();                      // vehículos + mensajes
+}
+requestAnimationFrame(interpTick);
 let tlDefs = { type: "FeatureCollection", features: [] };  // static signal positions
 let tlState = {};         // tlsID -> live state string ("GrGr...")
 let paused = false;
@@ -449,6 +540,30 @@ const roadW = (f) => 3.2 * (f.properties.lanes || 1);          // real carriagew
 // frame made deck.gl re-diff the 34k-edge geometries at every simulation step.
 let _casingLayer = null, _laneLayer = null;
 
+// procedural 3D vehicles (shadow, chassis, wheels, windshield, roof, lights),
+// with LOD: simple boxes when there are thousands of vehicles or zoomed out.
+// Separada de buildLayers para que la interpolación pueda refrescar SOLO esta
+// capa (reconstruir las ~10 capas restantes a 60 fps mataba el rendimiento
+// con flotas grandes).
+function makeVehiclesLayer() {
+  const detailed = vehicles.length <= LOD_MAX_DETAILED
+    && (!map || map.getZoom() >= LOD_MIN_ZOOM);
+  const mkParts = detailed ? vehicleParts : vehicleLod;
+  return new deck.PolygonLayer({
+    id: "vehicles",
+    // each part keeps a ref to its vehicle so right-click picking can inspect it
+    data: vehicles.flatMap((d) => mkParts(d).map((p) => (p.veh = d, p))),
+    extruded: true,
+    getPolygon: (p) => p.polygon,
+    getElevation: (p) => p.height,
+    getFillColor: (p) => p.color,
+    material: { ambient: 0.42, diffuse: 0.78, shininess: 90, specularColor: [90, 95, 105] },
+    stroked: false,
+    pickable: true,
+    updateTriggers: { getPolygon: [vehicles, detailed], getElevation: [vehicles, detailed], getFillColor: [vehicles, detailed] },
+  });
+}
+
 function buildLayers() {
   if (!_casingLayer) {
     // dark casing under the roads -> crisp, defined edges (surface colour unchanged)
@@ -538,24 +653,7 @@ function buildLayers() {
     }));
   }
 
-  // procedural 3D vehicles (shadow, chassis, wheels, windshield, roof, lights),
-  // with LOD: simple boxes when there are thousands of vehicles or zoomed out.
-  const detailed = vehicles.length <= LOD_MAX_DETAILED
-    && (!map || map.getZoom() >= LOD_MIN_ZOOM);
-  const mkParts = detailed ? vehicleParts : vehicleLod;
-  layers.push(new deck.PolygonLayer({
-    id: "vehicles",
-    // each part keeps a ref to its vehicle so right-click picking can inspect it
-    data: vehicles.flatMap((d) => mkParts(d).map((p) => (p.veh = d, p))),
-    extruded: true,
-    getPolygon: (p) => p.polygon,
-    getElevation: (p) => p.height,
-    getFillColor: (p) => p.color,
-    material: { ambient: 0.42, diffuse: 0.78, shininess: 90, specularColor: [90, 95, 105] },
-    stroked: false,
-    pickable: true,
-    updateTriggers: { getPolygon: [vehicles, detailed], getElevation: [vehicles, detailed], getFillColor: [vehicles, detailed] },
-  }));
+  layers.push(makeVehiclesLayer());
 
   // busy streets: a beacon marker on every street whose current vehicle count
   // reaches the selector threshold (busyMin)
@@ -629,8 +727,103 @@ function buildLayers() {
   return layers;
 }
 
+// Capas animadas de mensajes V2X (replay): pulso radial en cada TX + arco
+// TX->RX por recepción, ambos desvaneciéndose en MSG_TTL ms.
+function makeMessageLayers(now) {
+  // en pausa (modo paso a paso) los mensajes NO se desvanecen: quedan fijos
+  // en pantalla para poder inspeccionarlos con clic
+  const frozen = replayMode && paused;
+  if (!frozen) msgEvents = msgEvents.filter((e) => now - e.wallT < MSG_TTL);
+  if (!showMsgs || msgEvents.length === 0) return [];
+  const pulses = [], arcs = [];
+  for (const e of msgEvents) {
+    if (!msgFilterOn(e.type)) continue;
+    if (selStation !== null && e.st !== selStation) continue;
+    const prog = frozen ? 0.35 : (now - e.wallT) / MSG_TTL; // 0..1
+    const c = MSG_COLORS[e.type] || [200, 200, 200];
+    if (e.kind === "tx") {
+      pulses.push({ ...e, radius: 8 + 140 * prog,
+                    color: [...c, Math.round(170 * (1 - prog))] });
+    } else if (e.pos2) {
+      arcs.push({ ...e, color: [...c, Math.round(150 * (1 - prog))] });
+    }
+  }
+  const out = [];
+  // etiquetas de distancia (y RSSI si hay signal*.csv) sobre cada enlace;
+  // se muestran en modo paso/pausa o cuando hay pocos arcos (evita saturar)
+  if (showArcLabels && arcs.length && (frozen || arcs.length <= 40)) {
+    out.push(new deck.TextLayer({
+      id: "v2x-arc-lbl",
+      data: arcs,
+      billboard: true,
+      getPosition: (d) => [(d.pos[0] + d.pos2[0]) / 2,
+                           (d.pos[1] + d.pos2[1]) / 2, 10],
+      getText: (d) => `${d.dist} m` + (d.rssi != null ? ` · ${d.rssi} dBm` : ""),
+      getSize: 11, sizeUnits: "pixels",
+      getColor: (d) => [d.color[0], d.color[1], d.color[2], 235],
+      background: true,
+      getBackgroundColor: [10, 14, 20, 190],
+      backgroundPadding: [3, 1],
+      getTextAnchor: "middle", getAlignmentBaseline: "bottom",
+      parameters: { depthTest: false },
+    }));
+  }
+  if (arcs.length) out.push(new deck.ArcLayer({
+    id: "v2x-arc", data: arcs,
+    getSourcePosition: (d) => d.pos, getTargetPosition: (d) => d.pos2,
+    getSourceColor: (d) => d.color, getTargetColor: (d) => d.color,
+    getWidth: 2.5, getHeight: 0.6, greatCircle: false,
+    pickable: true,                    // clic en el arco = contenido del mensaje
+    parameters: { depthTest: false },
+  }));
+  if (pulses.length) out.push(new deck.ScatterplotLayer({
+    id: "v2x-pulse", data: pulses, stroked: true, filled: false,
+    getPosition: (d) => d.pos, getRadius: (d) => d.radius,
+    radiusUnits: "meters", getLineColor: (d) => d.color,
+    getLineWidth: 2.5, lineWidthUnits: "pixels",
+    pickable: true,                    // clic = contenido del mensaje
+    parameters: { depthTest: false },
+  }));
+  return out;
+}
+
+// anillo ámbar sobre el vehículo seleccionado en el filtro del replay: hace
+// visible de un vistazo QUIÉN es el emisor cuyos mensajes se están mostrando
+function makeHighlightLayer() {
+  if (selStation === null) return [];
+  const v = vehicles.find((x) => x.station === selStation);
+  if (!v) return [];
+  return [new deck.ScatterplotLayer({
+    id: "veh-selected",
+    data: [v],
+    stroked: true, filled: true,
+    getPosition: (d) => [d.lon, d.lat],
+    getRadius: 6, radiusUnits: "meters", radiusMinPixels: 14,
+    getFillColor: [255, 210, 63, 45],
+    getLineColor: [255, 210, 63, 230],
+    getLineWidth: 3, lineWidthUnits: "pixels",
+    parameters: { depthTest: false },
+  })];
+}
+
+const DYN_IDS = new Set(["vehicles", "veh-selected", "v2x-pulse", "v2x-arc", "v2x-arc-lbl"]);
+
 function refreshLayers() {
-  if (overlay) overlay.setProps({ layers: buildLayers() });
+  if (!overlay) return;
+  refreshLayers._last = [...buildLayers(), ...makeHighlightLayer(),
+                         ...makeMessageLayers(performance.now())];
+  overlay.setProps({ layers: refreshLayers._last });
+}
+
+// Refresco barato para los ticks de animación: solo se reconstruyen las capas
+// dinámicas (vehículos y mensajes); el resto se reutiliza por identidad.
+function refreshDynamicLayers() {
+  if (!overlay) return;
+  if (!refreshLayers._last) { refreshLayers(); return; }
+  const statics = refreshLayers._last.filter((l) => l && !DYN_IDS.has(l.id));
+  refreshLayers._last = [...statics, makeVehiclesLayer(), ...makeHighlightLayer(),
+                         ...makeMessageLayers(performance.now())];
+  overlay.setProps({ layers: refreshLayers._last });
 }
 
 // --- right-click inspector: live SUMO stats for the picked object ------------
@@ -775,6 +968,7 @@ function setupInspector() {
     });
     const html = info && info.object ? inspectorHtml(info) : null;
     if (!html) { popup.style.display = "none"; pendingInspect = null; return; }
+    popup.classList.remove("interactive");   // el inspector rápido no captura el ratón
     popup.innerHTML = html;
     popup.style.display = "block";
     popup.style.left = Math.min(e.clientX + 12, window.innerWidth - 290) + "px";
@@ -787,8 +981,10 @@ function setupInspector() {
       pendingInspect = null;
     }
   });
-  map.on("click", () => { popup.style.display = "none"; pendingInspect = null; });
-  map.on("dragstart", () => { popup.style.display = "none"; pendingInspect = null; });
+  map.on("click", () => { popup.style.display = "none";
+                          popup.classList.remove("interactive"); pendingInspect = null; });
+  map.on("dragstart", () => { popup.style.display = "none";
+                              popup.classList.remove("interactive"); pendingInspect = null; });
 }
 
 // fill in the popup when the extended stats arrive from the backend
@@ -812,7 +1008,8 @@ function applyInspect(msg) {
 // or reset, the previous socket is superseded, so its late frames and its close
 // event are ignored — this prevents two SUMO streams alternating (the flicker).
 function connect() {
-  const sock = new WebSocket(WS_URL + "?level=" + currentLevel);
+  const sock = new WebSocket(WS_URL + "?level=" + currentLevel +
+                             (replayMode ? "&replay=1" : ""));
   ws = sock;
   sock.onopen = () => { if (sock === ws) setConn(true); };
   sock.onerror = () => { if (sock === ws) setConn(false); };
@@ -825,7 +1022,22 @@ function connect() {
     if (sock !== ws) return;                        // drop frames from an old/switched-out run
     const msg = JSON.parse(ev.data);
     if (msg.type === "frame") {
-      vehicles = msg.vehicles;
+      // continuidad: el punto de partida de la interpolación es lo que está
+      // dibujado AHORA (vehicles), no el frame crudo anterior
+      interpPrev = new Map(vehicles.map((v) => [v.id, { lon: v.lon, lat: v.lat, angle: v.angle }]));
+      const nowMs = performance.now();
+      if (interpT0) {
+        interpPeriod = Math.min(Math.max(0.8 * interpPeriod + 0.2 * (nowMs - interpT0), 30), 2000);
+      }
+      interpT0 = nowMs;
+      frameVehicles = msg.vehicles;            // OBJETIVO de la interpolación
+      // OJO: no asignar vehicles aquí — pintar ya la posición nueva provocaba
+      // salto + retroceso en el primer tick. Los ticks deslizan hacia
+      // frameVehicles; el refreshLayers() de abajo repinta LOS/semáforos con
+      // los vehículos donde están dibujados ahora.
+      // interp. desactivada con flotas enormes; y en modo paso (pausado) los
+      // vehículos deben SALTAR a la posición del frame (la interp. no corre)
+      if (paused || frameVehicles.length > INTERP_MAX_VEH) vehicles = frameVehicles;
       const now = performance.now();
       if (now - lastLosMs >= LOS_UPDATE_MS) {      // throttled LOS/count snapshot
         edgeColors = {}; edgeCounts = {}; edgeStats = {};
@@ -835,10 +1047,63 @@ function connect() {
         losStamp++; lastLosMs = now;
       }
       tlState = msg.tls || {};
-      if (msg.stats) updateHistory(msg.stats, vehicles.length, msg.t);
-      els.vehCount.textContent = vehicles.length;
+      // eventos de mensajes V2X (solo replay): capturar posiciones AHORA para
+      // que pulso/arco queden anclados aunque el vehículo siga moviéndose
+      if (msg.messages && showMsgs) {
+        if (replayMode && paused) msgEvents = [];   // modo paso: solo ESTE paso
+        const posOf = {};
+        for (const v of msg.vehicles) posOf[v.station] = [v.lon, v.lat];
+        const wall = performance.now();
+        for (const e of msg.messages.tx) {
+          if (posOf[e.tx]) msgEvents.push({ kind: "tx", type: e.type, simT: e.t,
+            st: e.tx, pos: posOf[e.tx], wallT: wall });
+        }
+        for (const e of msg.messages.rx) {
+          const pt = posOf[e.tx], pr = posOf[e.rx];
+          if (pt && pr) {
+            msgEvents.push({ kind: "rx", type: e.type, simT: e.t, st: e.tx,
+              pos: pt, pos2: pr, wallT: wall, rssi: e.rssi,
+              dist: Math.round(metersBetween(pt[0], pt[1], pr[0], pr[1])) });
+          }
+        }
+        if (msgEvents.length > 3000) msgEvents = msgEvents.slice(-3000);
+      }
+      if (replayMode) {
+        els.rpTime.textContent = `${msg.t}s / ${Math.round(replayT1)}s`;
+        if (!rpDragging) els.rpSeek.value = msg.t;
+      }
+      if (msg.stats) updateHistory(msg.stats, frameVehicles.length, msg.t);
+      els.vehCount.textContent = frameVehicles.length;
       els.simTime.textContent = msg.t;
       refreshLayers();
+    } else if (msg.type === "meta") {
+      const isReplay = msg.mode === "replay";
+      els.replayBar.style.display = isReplay ? "" : "none";
+      els.stepRow.style.display = isReplay ? "" : "none";
+      els.rowMsgs.style.display = isReplay ? "" : "none";
+      els.rowMsgFilter.style.display = isReplay ? "" : "none";
+      if (isReplay) {
+        replayT0 = msg.t0 || 0; replayT1 = msg.t1 || 0;
+        els.rpSeek.min = replayT0; els.rpSeek.max = replayT1;
+        els.rpSeek.value = replayT0;
+        els.conn.textContent = "replay pcap";
+        // selector de vehículo emisor (stationID reales de la corrida)
+        const st = (msg.replay && msg.replay.stations) || [];
+        els.vehFilter.innerHTML = '<option value="">All</option>' +
+          st.map((s) => `<option value="${s}">veh${s}</option>`).join("");
+        selStation = null;
+        // desplegar el panel Replay V2X al entrar en modo replay
+        const rp = document.getElementById("replay-panel");
+        if (rp) rp.classList.remove("collapsed");
+        // panel PHY: estadísticas de capa física de la corrida
+        const pp = document.getElementById("phy-panel");
+        if (pp) { pp.style.display = ""; loadPhyStats(); }
+      } else {
+        const pp = document.getElementById("phy-panel");
+        if (pp) pp.style.display = "none";
+      }
+    } else if (msg.type === "msg_detail") {
+      showMsgDetail(msg);
     } else if (msg.type === "inspect") {
       applyInspect(msg);
     } else if (msg.type === "end") {
@@ -854,21 +1119,28 @@ function setConn(on) {
 }
 
 // --- controls ---------------------------------------------------------------
+// estado de pausa sincronizado entre el botón principal y el ⏸/▶ del panel Replay
+function setPaused(v) {
+  paused = v;
+  els.play.textContent = v ? "▶ Reanudar" : "⏸ Pausar";
+  if (els.rpPlay) els.rpPlay.textContent = v ? "▶" : "⏸";
+}
 els.play.onclick = () => {
-  paused = !paused;
-  els.play.textContent = paused ? "▶ Reanudar" : "⏸ Pausar";
+  setPaused(!paused);
   send({ cmd: paused ? "pause" : "play" });
 };
 els.reset.onclick = () => {
   if (ws) ws.close();
-  vehicles = []; edgeColors = {}; refreshLayers();
+  vehicles = []; frameVehicles = []; interpPrev = new Map(); interpT0 = 0;
+  edgeColors = {}; refreshLayers();
   paused = false; els.play.textContent = "⏸ Pausar";
   connect();
 };
 els.level.onchange = () => {
   currentLevel = els.level.value;                 // switch scenario -> reconnect
   if (ws) ws.close();
-  vehicles = []; edgeColors = {}; tlState = {}; refreshLayers();
+  vehicles = []; frameVehicles = []; interpPrev = new Map(); interpT0 = 0;
+  edgeColors = {}; tlState = {}; refreshLayers();
   paused = false; els.play.textContent = "⏸ Pausar";
   connect();
 };
@@ -876,6 +1148,170 @@ els.fps.oninput = () => {
   els.fpsVal.textContent = `${els.fps.value} fps`;
   send({ cmd: "speed", fps: Number(els.fps.value) });
 };
+
+// --- replay: alternar modo, timeline y mensajes ------------------------------
+els.replayBtn.onclick = () => {
+  replayMode = !replayMode;
+  els.replayBtn.textContent = replayMode ? "🔴 Volver al modo en vivo" : "🎞 Replay pcap";
+  if (ws) ws.close();
+  vehicles = []; frameVehicles = []; interpPrev = new Map(); interpT0 = 0;
+  msgEvents = []; edgeColors = {}; tlState = {}; refreshLayers();
+  paused = false; els.play.textContent = "⏸ Pausar";
+  if (!replayMode) {
+    els.replayBar.style.display = "none";
+    els.stepRow.style.display = "none";
+    els.rowMsgs.style.display = "none";
+    els.rowMsgFilter.style.display = "none";
+    const pp = document.getElementById("phy-panel");
+    if (pp) pp.style.display = "none";
+  }
+  connect();
+};
+// paso a paso: avanza APP_STEP_LENGTH seg simulados y pausa; los mensajes del
+// paso quedan congelados en pantalla (clic en un pulso = contenido)
+els.rpPlay.onclick = () => {
+  setPaused(!paused);
+  send({ cmd: paused ? "pause" : "play" });
+};
+els.rpStep.onclick = () => {
+  setPaused(true);
+  send({ cmd: "step" });
+};
+els.rpBack.onclick = () => {
+  setPaused(true);
+  interpPrev = new Map(); interpT0 = 0;   // sin interpolar el salto hacia atrás
+  send({ cmd: "step_back" });
+};
+els.vehFilter.onchange = () => {
+  selStation = els.vehFilter.value === "" ? null : Number(els.vehFilter.value);
+  refreshLayers();
+};
+els.rpSeek.oninput = () => {
+  rpDragging = true;
+  els.rpTime.textContent = `${els.rpSeek.value}s / ${Math.round(replayT1)}s`;
+  send({ cmd: "seek", t: Number(els.rpSeek.value) });
+  interpPrev = new Map(); interpT0 = 0; msgEvents = [];   // sin interpolar el salto
+};
+els.rpSeek.onchange = () => {
+  rpDragging = false;
+  if (paused) { setPaused(false); send({ cmd: "play" }); }
+};
+els.msgsToggle.onchange = () => {
+  showMsgs = els.msgsToggle.checked;
+  if (!showMsgs) msgEvents = [];
+  refreshLayers();
+};
+els.arcLbl.onchange = () => {
+  showArcLabels = els.arcLbl.checked;
+  refreshLayers();
+};
+
+// clic izquierdo sobre un pulso de transmisión -> contenido ASN.1 del mensaje
+document.getElementById("map").addEventListener("click", (e) => {
+  if (!replayMode || !overlay) return;
+  const rect = e.currentTarget.getBoundingClientRect();
+  const info = overlay.pickObject({ x: e.clientX - rect.left, y: e.clientY - rect.top,
+                                    layerIds: ["v2x-pulse", "v2x-arc"], radius: 10 });
+  if (!info || !info.object) return;
+  send({ cmd: "inspect", station: info.object.st, t: info.object.simT,
+         mtype: info.object.type });
+  const popup = document.getElementById("popup");
+  popup.classList.add("interactive");        // permitir ratón: scroll del contenido
+  popup.style.display = "block";
+  popup.style.left = Math.min(e.clientX + 14, window.innerWidth - 420) + "px";
+  popup.style.top = Math.min(e.clientY + 14, window.innerHeight - 420) + "px";
+  popup.innerHTML = `<h3>Mensaje ${info.object.type} · veh${info.object.st}</h3>cargando contenido…`;
+});
+
+// panel PHY 802.11p: métricas de la corrida derivadas de los pcap.
+// Con reintentos: justo tras un build/up el backend puede tardar unos
+// segundos (nginx devuelve su página HTML de error 502 mientras tanto).
+async function loadPhyStats(attempt = 0) {
+  const body = document.getElementById("phy-body");
+  if (!body) return;
+  const retry = () => { body.textContent = `cargando estadísticas… (intento ${attempt + 2})`;
+                        setTimeout(() => loadPhyStats(attempt + 1), 2500); };
+  try {
+    const res = await fetch(API + "/api/replay/info", { cache: "no-store" });
+    const ct = res.headers.get("content-type") || "";
+    if (res.status === 404) {
+      body.textContent = "el backend no tiene /api/replay/info: reconstrúyelo " +
+        "(docker compose --profile visor build backend && ... up -d)";
+      return;
+    }
+    if (!res.ok || !ct.includes("json")) {
+      if (attempt < 6) return retry();
+      body.textContent = `backend no disponible (HTTP ${res.status}): revisa ` +
+        `docker compose logs backend`;
+      return;
+    }
+    const info = await res.json();
+    if (info.error) { body.textContent = "replay sin cargar: " + info.error; return; }
+    const p = info.phy || {};
+    const f = (x, d = 1) => (x == null ? "–" : Number(x).toFixed(d));
+    const c = p.config || {}, l = p.latency_ms || {}, r = p.range_m || {};
+    const pdrOne = (o) => { const k = Object.keys(o || {})[0];
+                            return k ? `${k.replace("->", "→")}: ${(o[k] * 100).toFixed(1)}%` : "–"; };
+    const rates = Object.entries(p.rates_per_s || {})
+      .map(([k, v]) => `${k} ${f(v)}/s`).join(" · ") || "–";
+    body.innerHTML =
+      `<b>Banda:</b> ${c.banda || "–"}<br>` +
+      `<b>Canal:</b> ${c.canal || "–"} · <b>BW:</b> ${c.bw || "–"}<br>` +
+      `<b>Modulación:</b> ${c.modulacion || "–"}<br>` +
+      `<b>Potencia TX:</b> ${c.tx_power || "–"}<br>` +
+      `<div class="phy-sep"></div>` +
+      (p.rssi_dbm
+        ? `<b>RSSI:</b> media ${f(p.rssi_dbm.mean)} · p50 ${f(p.rssi_dbm.p50)} · ` +
+          `mín ${f(p.rssi_dbm.min)} dBm <span style="opacity:.6">(${p.rssi_dbm.n} muestras)</span><br>`
+        : "") +
+      `<b>Latencia TX→RX:</b> media ${f(l.mean)} · p95 ${f(l.p95)} · máx ${f(l.max)} ms<br>` +
+      `<b>Cobertura observada:</b> p50 ${f(r.p50, 0)} · p95 ${f(r.p95, 0)} · máx ${f(r.max, 0)} m<br>` +
+      `<b>PER global:</b> ${p.per == null ? "–" : (p.per * 100).toFixed(1) + "%"}` +
+      ` <span style="opacity:.6">(${p.got_rx ?? "?"}/${p.expected_rx ?? "?"} RX)</span><br>` +
+      `<b>PDR mejor par:</b> ${pdrOne(p.pdr_best)}<br>` +
+      `<b>PDR peor par:</b> ${pdrOne(p.pdr_worst)}<br>` +
+      `<b>Tasas TX:</b> ${rates}<br>` +
+      `<b>Canal ocupado:</b> ~${p.channel_util == null ? "–" : (p.channel_util * 100).toFixed(1)}%` +
+      ` · <b>Tramas:</b> ${p.frames ? p.frames.tx + " TX / " + p.frames.rx + " RX" : "–"}<br>` +
+      `<span style="opacity:.55;font-size:11px">${c.nota_rx || ""}</span>`;
+  } catch (e) {
+    if (attempt < 6) return retry();
+    body.textContent = "estadísticas PHY no disponibles: " + e.message;
+  }
+}
+
+function showMsgDetail(d) {
+  const popup = document.getElementById("popup");
+  popup.classList.add("interactive");        // scroll con la rueda dentro del popup
+  popup.style.display = "block";
+  const rec = (d.receivers_info && d.receivers_info.length)
+    ? d.receivers_info.map((i) =>
+        `veh${i.rx} (${i.dist_m != null ? i.dist_m + " m" : "?"}` +
+        `${i.rssi != null ? ", " + i.rssi + " dBm" : ""})`).join(" · ")
+    : ((d.receivers || []).map((r) => "veh" + r).join(", ") || "ninguno");
+  let html = `<h3><span class="popup-close" title="Cerrar">✕</span>` +
+             `${d.mtype} · veh${d.tx} · t = ${(d.t ?? 0).toFixed(3)} s</h3>` +
+             `Receptores: <b>${rec}</b> · ${d.bytes ?? "?"} bytes ASN.1 UPER`;
+  // disección por capas, estilo Wireshark: secciones plegables
+  const sec = (title, obj, open) => obj ?
+    `<details${open ? " open" : ""}><summary>${title}</summary>` +
+    `<pre>${JSON.stringify(obj, null, 1)}</pre></details>` : "";
+  const L = d.layers || {};
+  html += sec("IEEE 802.11", L.ieee80211, false) +
+          sec("GeoNetworking · SHB", L.geonetworking, false) +
+          sec("BTP-B", L.btp, false);
+  if (d.content) {
+    html += sec(`ITS · ${d.mtype} (ASN.1)`, d.content, true);
+  } else if (d.decode_error) {
+    html += `<br><span style="opacity:.7">sin decodificar: ${d.decode_error}</span>`;
+  } else if (d.error) {
+    html += `<br><span style="opacity:.7">${d.error}</span>`;
+  }
+  popup.innerHTML = html;
+  const x = popup.querySelector(".popup-close");
+  if (x) x.onclick = () => { popup.style.display = "none";
+                             popup.classList.remove("interactive"); };
+}
 els.buildings.onchange = () => setBuildingsVisible(els.buildings.checked);
 els.congestion.onchange = () => { showCongestion = els.congestion.checked; refreshLayers(); };
 els.tl.onchange = () => { showTL = els.tl.checked; refreshLayers(); };
@@ -964,14 +1400,37 @@ function send(obj) {
 }
 
 // --- auto-hide panels: collapse to their title bar when the pointer leaves,
-//     expand on hover (shown briefly on load so the controls are found)
-for (const id of ["panel", "histpanel"]) {
+//     expand on hover (shown briefly on load so the controls are found).
+//     El 📌 fija el panel (no se auto-colapsa); se recuerda en localStorage.
+for (const id of ["panel", "histpanel", "replay-panel", "phy-panel"]) {
   const p = document.getElementById(id);
   if (!p) continue;
+  let pinned = false;
+  try { pinned = localStorage.getItem("pin-" + id) === "1"; } catch (_) {}
+  const pin = document.createElement("span");
+  pin.className = "pin";
+  pin.textContent = "📌";
+  pin.title = "Fijar este panel (no auto-ocultar)";
+  const apply = () => {
+    pin.classList.toggle("on", pinned);
+    if (pinned) p.classList.remove("collapsed");
+  };
+  pin.onclick = (e) => {
+    e.stopPropagation();
+    pinned = !pinned;
+    try { localStorage.setItem("pin-" + id, pinned ? "1" : "0"); } catch (_) {}
+    apply();
+  };
+  const h = p.querySelector("h1");
+  if (h) h.appendChild(pin);
+  apply();
   let t = null;
   p.addEventListener("mouseenter", () => { clearTimeout(t); p.classList.remove("collapsed"); });
-  p.addEventListener("mouseleave", () => { clearTimeout(t); t = setTimeout(() => p.classList.add("collapsed"), 600); });
-  setTimeout(() => p.classList.add("collapsed"), 2500);
+  p.addEventListener("mouseleave", () => {
+    clearTimeout(t);
+    if (!pinned) t = setTimeout(() => p.classList.add("collapsed"), 600);
+  });
+  setTimeout(() => { if (!pinned) p.classList.add("collapsed"); }, 2500);
 }
 
 boot().catch((e) => { els.conn.textContent = "error: " + e.message; });

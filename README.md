@@ -62,10 +62,10 @@ install, no game engine — on the web-native **MapLibre GL JS + deck.gl** stack
 ```bash
 docker compose up --build
 # backend  -> http://localhost:8000/api/health
-# frontend -> http://localhost:8081
+# frontend -> http://localhost:8082
 ```
 
-Open **http://localhost:8081**. The default scenario is the **Cuenca centro** map
+Open **http://localhost:8082**. The default scenario is the **Cuenca centro** map
 built from OSM (`sumo/cuenca.*`, with 3D buildings). The metropolitan network
 (`mapa/`) is available as the commented alternative in `docker-compose.yml`
 (its `network.net.xml` is git-ignored — regenerate it, see *Scripts*).
@@ -278,7 +278,7 @@ mapa/               Metro: metro_{low,mid,high}.{rou.xml,sumocfg}, vtypes, trans
                     (network.net.xml git-ignored — rebuild with build_city.sh)
 scripts/            build_city.sh · gen_traffic.py · enrich_heights.py · generate_scenario.sh
 docs/               tool-evaluation report (.docx) + comparison matrix (.xlsx)
-docker-compose.yml  backend + nginx frontend (:8081); scenario switch block inside
+docker-compose.yml  backend + nginx frontend (:8082); scenario switch block inside
 ROADMAP.md          phased technical plan
 ```
 
