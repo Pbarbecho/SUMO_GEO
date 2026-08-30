@@ -47,14 +47,27 @@ _ASN_SETS = {
 _ASN_TOP = {"CAM": "CAM", "CPM": "CollectivePerceptionMessage", "DENM": "DENM"}
 
 
+# Specs ASN.1 compiladas, compartidas entre TODAS las instancias del proceso.
+# Compilar la spec CAM tarda ~0.3 s: hacerlo por instancia significaba pagarlo
+# en cada recarga del índice en vivo (ráfaga de GIL → micro-pausas del stream).
+_SPEC_CACHE: dict = {}
+
+
 class ReplayData:
-    """Índice en memoria de una corrida: eventos, trayectorias y stats."""
+    """Índice en memoria de una corrida: eventos, trayectorias y stats.
+
+    ``live=True`` = modo ligero para el índice EN VIVO: el mapeo nodo→station
+    decodifica solo el ÚLTIMO CAM propio de cada nodo (el mapeo vigente) en
+    vez de todos (miles de decodes asn1tools que crecían con la corrida y
+    pausaban el visor por contención de GIL). Suficiente para anclar los
+    eventos recientes que muestra el modo en vivo."""
 
     def __init__(self, pcap_dir: str, asn_dir: str | None = None,
-                 pattern: str = "*.pcap"):
+                 pattern: str = "*.pcap", live: bool = False):
         self.pcap_dir = pcap_dir
         self.asn_dir = asn_dir
         self.pattern = pattern
+        self.live = live
         self.stations: list[int] = []          # ids de estación presentes
         self.tx: list[dict] = []               # eventos TX ordenados por t
         self.rx: list[dict] = []               # eventos RX ordenados por t
@@ -188,6 +201,26 @@ class ReplayData:
             return {}, {}
         segments: dict[int, list] = defaultdict(list)
         stype: dict[int, int] = {}
+        if self.live:
+            # modo vivo: solo el último CAM de cada nodo (mapeo vigente) —
+            # un decode por nodo por recarga en vez de miles
+            last: dict[int, dict] = {}
+            for e in self.tx:
+                if e["type"] == "CAM":
+                    last[e["tx"]] = e
+            for node, e in last.items():
+                entry = self._payloads.get((node, round(e["t"] * 1e6)))
+                if not entry:
+                    continue
+                try:
+                    d = spec.decode("CAM", entry[0])
+                    sid = int(d["header"]["stationID"])
+                except Exception:  # noqa: BLE001
+                    continue
+                segments[node] = [(0.0, sid)]
+                stype[sid] = int(d["cam"]["camParameters"]
+                                 ["basicContainer"]["stationType"])
+            return dict(segments), stype
         for e in self.tx:                       # aún etiquetados por nodo
             if e["type"] != "CAM":
                 continue
@@ -461,6 +494,10 @@ class ReplayData:
     def _spec(self, mtype: str):
         if mtype in self._specs:
             return self._specs[mtype]
+        key = (self.asn_dir, mtype)
+        if key in _SPEC_CACHE:                  # compartida entre instancias
+            self._specs[mtype] = _SPEC_CACHE[key]
+            return self._specs[mtype]
         if not self.asn_dir or mtype not in _ASN_SETS:
             self._specs[mtype] = None
             return None
@@ -471,6 +508,7 @@ class ReplayData:
             self._specs[mtype] = asn1tools.compile_files(files, "uper")
         except Exception:
             self._specs[mtype] = None
+        _SPEC_CACHE[key] = self._specs[mtype]
         return self._specs[mtype]
 
     def decode(self, station: int, t: float, mtype_hint: str | None = None) -> dict:

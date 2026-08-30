@@ -10,10 +10,17 @@
 <body>
   <div id="map"></div>
   <div id="tint"></div>
+  <div id="scanlines"></div>
 
   <div id="popup"></div>
 
   <button id="btn-zen" title="Ocultar / mostrar todos los paneles (modo presentación)">⛶</button>
+
+  <div id="follow-badge" style="display:none">
+    🎥 Siguiendo <span id="follow-veh"></span>
+    <span id="follow-hud"></span>
+    <button id="follow-exit" title="Salir del modo cámara">✕</button>
+  </div>
 
   <div id="histpanel">
     <h1>Históricos</h1>
@@ -67,6 +74,14 @@
     <button id="light-night" class="icon-btn" title="Noche">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z"/></svg>
     </button>
+    <span class="topbar-sep"></span>
+    <select id="sensor-mode" class="icon-btn" style="width:auto;padding:7px 8px" title="Modo sensor (re-tiñe la escena, estilo cockpit)">
+      <option value="normal">Normal</option>
+      <option value="nvg">NVG</option>
+      <option value="flir">FLIR</option>
+      <option value="noir">Noir</option>
+      <option value="crt">CRT</option>
+    </select>
   </div>
 
   <div id="left-col">
@@ -77,14 +92,6 @@
       <button id="btn-play">⏸ Pausar</button>
       <button id="btn-reset">⟳ Reiniciar</button>
     </div>
-    <label class="row">
-      Escenario
-      <select id="level">
-        <option value="low">Bajo</option>
-        <option value="mid" selected>Medio</option>
-        <option value="high">Alto</option>
-      </select>
-    </label>
     <label class="row">
       Velocidad
       <input id="fps" type="range" min="1" max="30" value="10" />
@@ -101,6 +108,9 @@
     </label>
     <label class="row">
       <input id="toggle-poi" type="checkbox" /> PoI
+    </label>
+    <label class="row">
+      <input id="toggle-detect" type="checkbox" /> Detección (HUD)
     </label>
     <label class="row">
       <input id="toggle-busy" type="checkbox" /> Calles concurridas
@@ -132,17 +142,29 @@
     <div class="row">
       <button id="btn-replay" title="Reproducir una corrida grabada (.pcap de VaN3Twin) con el intercambio de mensajes V2X">🎞 Replay pcap</button>
     </div>
-    <div class="row" id="replay-bar" style="display:none">
-      <input id="rp-seek" type="range" min="0" max="100" step="0.5" value="0" style="flex:1" />
-      <span id="rp-time" style="font-size:11px;white-space:nowrap">0s</span>
+    <div id="replay-bar" style="display:none">
+      <input id="rp-seek" type="range" min="0" max="100" step="0.5" value="0" />
+      <div id="rp-time-row">
+        <span id="rp-time-cur">0:00</span>
+        <span id="rp-time-total">0:00</span>
+      </div>
     </div>
     <div class="row" id="replay-step-row" style="display:none">
       <button id="rp-back" class="step-btn" title="Paso atrás: retrocede un frame y pausa">⏮</button>
       <button id="rp-play" class="step-btn" title="Reproducir / pausar el replay">⏸</button>
       <button id="rp-step" class="step-btn" title="Paso adelante: avanza un frame y pausa; los mensajes del paso quedan fijos para inspeccionarlos">⏭</button>
+    </div>
+    <div class="row" id="row-veh-filter" style="display:none">
+      <span style="font-size:12px;opacity:.85">Emisor</span>
       <select id="veh-filter" title="Mostrar solo los mensajes emitidos por un vehículo" style="flex:1">
         <option value="">All</option>
       </select>
+    </div>
+    <div class="row" id="rp-speed-row" style="display:none">
+      <span style="font-size:12px;opacity:.85">Velocidad</span>
+      <button id="rp-slow" class="step-btn" title="Reproducir más lento">🐢</button>
+      <span id="rp-speed" title="Multiplicador de velocidad del replay">1×</span>
+      <button id="rp-fast" class="step-btn" title="Reproducir más rápido">🐇</button>
     </div>
     <label class="row" id="row-msgs" style="display:none">
       <input id="toggle-msgs" type="checkbox" checked /> Mensajes V2X
@@ -163,6 +185,9 @@
 
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/deck.gl@9.0.38/dist.min.js"></script>
+  <!-- cargador glTF para ScenegraphLayer (vehículos 3D): en deck.gl 9 los
+       loaders van aparte del bundle principal; expone el global `loaders` -->
+  <script src="https://unpkg.com/@loaders.gl/gltf@4.2.2/dist/dist.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -13,9 +13,34 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-#map { position: absolute; inset: 0; background: var(--bg); }
+#map { position: absolute; inset: 0; background: var(--bg); transition: filter .35s ease; }
 /* scene tint used by the light presets (dusk/night wash); never blocks clicks */
 #tint { position: absolute; inset: 0; z-index: 2; pointer-events: none; transition: background .6s ease; }
+
+/* CRT scanlines + vignette overlay for the "sensor look" selector — hidden
+   unless the CRT mode is active (toggled via body[data-sensor="crt"]) */
+#scanlines {
+  position: absolute; inset: 0; z-index: 3; pointer-events: none; opacity: 0;
+  transition: opacity .35s ease;
+  background:
+    repeating-linear-gradient(rgba(0,0,0,0) 0, rgba(0,0,0,0) 2px, rgba(0,0,0,.14) 3px),
+    radial-gradient(ellipse at center, rgba(0,0,0,0) 55%, rgba(0,0,0,.45) 100%);
+}
+body[data-sensor="crt"] #scanlines { opacity: 1; }
+#sensor-mode { background: var(--btn); color: var(--fg); border: 0; border-radius: 6px; font-size: 12px; }
+
+/* floating badge shown while the camera is chasing a vehicle (cockpit mode) */
+#follow-badge {
+  position: absolute; top: 60px; left: 50%; transform: translateX(-50%); z-index: 7;
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: 12px;
+  background: var(--panel); color: var(--fg); border-radius: 8px;
+  border-top: 3px solid var(--ucu-rojo); box-shadow: 0 6px 24px #0008; backdrop-filter: blur(6px);
+}
+#follow-hud { opacity: .85; color: var(--accent); white-space: nowrap; }
+#follow-exit {
+  flex: none; width: 22px; height: 22px; padding: 0; border-radius: 6px;
+  font-size: 12px; line-height: 22px; background: var(--btn);
+}
 
 #left-col {
   position: absolute; top: 12px; left: 12px; z-index: 5;
@@ -134,6 +159,33 @@ input[type=range] { flex: 1; accent-color: var(--accent); }
 }
 .popup-close:hover { opacity: 1; }
 .step-btn { flex: 0 0 auto !important; padding: 7px 12px; font-size: 14px; }
+
+/* barra de tiempo del Replay V2X — track relleno hasta la posición actual
+   (el relleno lo pinta app.js via background: linear-gradient inline),
+   con etiquetas de tiempo actual/total debajo, estilo reproductor */
+#replay-bar { margin: 8px 0; }
+#rp-seek {
+  -webkit-appearance: none; appearance: none; width: 100%; height: 6px;
+  border-radius: 999px; outline: none; cursor: pointer;
+  background: var(--line);   /* fallback; JS sobreescribe con el degradado de progreso */
+}
+#rp-seek::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--accent); border: 2px solid #fff; cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0,0,0,.5); margin-top: -4px;
+}
+#rp-seek::-moz-range-track { height: 6px; border-radius: 999px; background: var(--line); }
+#rp-seek::-moz-range-progress { height: 6px; border-radius: 999px; background: var(--accent); }
+#rp-seek::-moz-range-thumb {
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--accent); border: 2px solid #fff; cursor: pointer;
+}
+#rp-time-row { display: flex; justify-content: space-between; font-size: 11px; margin-top: 4px; }
+#rp-speed { min-width: 42px; text-align: center; font-size: 12.5px; font-weight: 700;
+  color: var(--accent); flex: 1; }
+#rp-time-cur { color: var(--accent); font-weight: 600; }
+#rp-time-total { opacity: .7; }
 /* capas plegables del popup de mensaje (disección estilo Wireshark) */
 #popup.interactive details { margin: 5px 0 0; }
 #popup.interactive summary {

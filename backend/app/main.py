@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from collections import Counter
 from contextlib import asynccontextmanager
 
@@ -120,14 +121,93 @@ def _get_replay():
     return rep
 
 
-@app.get("/api/replay/info")
-async def replay_info():
+_live: dict = {"rep": None, "fp": None, "next": 0.0, "busy": False,
+               "phy": None, "phy_t": 0.0}
+_LIVE_PHY_EVERY_S = 12.0       # recálculo PHY como mucho cada tanto (es O(eventos))
+
+
+def _live_build(want_phy: bool):
+    """Corre EN UN THREAD: escanea live_pcap_dir y, si la huella cambió,
+    parsea un índice nuevo (modo live=ligero). Si toca, calcula también las
+    stats PHY AQUÍ (nunca en la petición del panel: su coste O(eventos) cada
+    10 s era una de las pausas periódicas del visor). Devuelve
+    (rep, fp, dur_s, phy|None) o None si no hay nada nuevo."""
+    import glob as _g
+    import time as _time
+    files = sorted(
+        _g.glob(os.path.join(settings.live_pcap_dir, "v2v-*.pcap")) +
+        _g.glob(os.path.join(settings.live_pcap_dir, "signal*.csv")))
+    if not files:
+        return None
     try:
-        r = _get_replay()
+        fp = tuple((f, os.path.getmtime(f), os.path.getsize(f)) for f in files)
+    except OSError:
+        return None
+    if fp == _live["fp"] and _live["rep"] is not None:
+        return None
+    try:
+        from .replay import ReplayData
+        t0 = _time.monotonic()
+        rep = ReplayData(settings.live_pcap_dir, settings.asn_dir,
+                         "v2v-*.pcap", live=True)
+        phy = rep.phy_stats() if want_phy else None
+        return rep, fp, _time.monotonic() - t0, phy
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _live_refresh_bg():
+    """Tarea de fondo: reconstruye el índice y lo intercambia al terminar.
+    El throttle se adapta al coste real del parse (crece con el pcap) para que
+    el refresco nunca domine la CPU en corridas largas."""
+    import time as _time
+    try:
+        now = _time.monotonic()
+        want_phy = now - _live["phy_t"] > _LIVE_PHY_EVERY_S
+        res = await asyncio.to_thread(_live_build, want_phy)
+        if res is not None:
+            _live["rep"], _live["fp"] = res[0], res[1]
+            _live["next"] = _time.monotonic() + max(settings.live_refresh_s,
+                                                    3.0 * res[2])
+            if res[3] is not None:
+                _live["phy"], _live["phy_t"] = res[3], _time.monotonic()
+    finally:
+        _live["busy"] = False
+
+
+def _live_rep_nowait():
+    """Índice V2X en vivo SIN bloquear jamás: devuelve el caché al instante y,
+    si toca refrescar, lanza la reconstrucción como tarea de fondo. (La versión
+    anterior hacía `await` del re-parse en el bucle de frames: cada ~2 s el
+    stream se congelaba el tiempo del parse — las pausas periódicas del visor.)"""
+    import time as _time
+    if not settings.live_pcap_dir:
+        return None
+    now = _time.monotonic()
+    if now >= _live["next"] and not _live["busy"]:
+        _live["busy"] = True
+        if _live["next"] == 0.0:               # primer chequeo: fijar throttle base
+            _live["next"] = now + max(settings.live_refresh_s, 0.5)
+        asyncio.get_running_loop().create_task(_live_refresh_bg())
+    return _live["rep"]
+
+
+@app.get("/api/replay/info")
+async def replay_info(live: int = 0):
+    try:
+        r = _live_rep_nowait() if live else await asyncio.to_thread(_get_replay)
+        if r is None:
+            raise FileNotFoundError("sin pcaps en vivo todavía")
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"error": str(exc)}, status_code=404)
+    if live:
+        # solo caché: las PHY en vivo se calculan en la tarea de fondo con
+        # throttle — nunca en el camino de la petición (pausaba el stream)
+        phy = _live["phy"] or {}
+    else:
+        phy = await asyncio.to_thread(r.phy_stats)   # 1ª llamada: costosa
     return {"t0": r.t0, "t1": r.t1, "stations": r.stations, **r.stats,
-            "phy": r.phy_stats()}
+            "phy": phy}
 
 
 async def _ws_replay(ws: WebSocket):
@@ -170,6 +250,11 @@ async def _ws_replay(ws: WebSocket):
                     paused, single = False, True
                 elif action == "speed":
                     period = 1.0 / max(float(cmd.get("fps", settings.max_fps)), 0.1)
+                    # avance simulado por frame opcional: permite al visor pedir
+                    # muchos frames pequeños (10 fps × 0.1 s = 1× tiempo real,
+                    # suave) en vez de pocos grandes (2 fps × 0.5 s, robótico)
+                    if "step" in cmd:
+                        step = min(max(float(cmd["step"]), 0.01), 10.0)
                 elif action == "seek":
                     t = min(max(float(cmd.get("t", rep.t0)), rep.t0), rep.t1)
                 elif action == "inspect":
@@ -251,6 +336,7 @@ async def ws_live(ws: WebSocket):
 
     paused = False
     period = 1.0 / max(settings.max_fps, 0.1)
+    sent_v2x: set = set()      # dedup de eventos V2X ya enviados (modo en vivo)
     await ws.send_json({"type": "meta", **_state["meta"]})
 
     async def read_command():
@@ -292,7 +378,7 @@ async def ws_live(ws: WebSocket):
             vehs = bridge.vehicles(netgeo)
             stats = bridge.frame_stats()
             stats["types"] = dict(Counter(v["type"] for v in vehs))
-            await ws.send_json({
+            frame = {
                 "type": "frame",
                 "t": round(t, 1),
                 "vehicles": vehs,
@@ -300,7 +386,33 @@ async def ws_live(ws: WebSocket):
                                          (v["edge"] for v in vehs)),
                 "tls": bridge.trafficlights(),
                 "stats": stats,
-            })
+            }
+            # --- mensajes V2X en vivo: leer los pcap que ns-3 escribe durante
+            # la corrida (montados RO en live_pcap_dir) y adjuntar los eventos
+            # aún no enviados. station = nº del id SUMO (== stationID ETSI en
+            # el mapeo del replay); el visor ancla pulsos/arcos por station.
+            if settings.live_pcap_dir:
+                for v in vehs:
+                    m = re.search(r"(\d+)", v["id"])
+                    if m:
+                        v["station"] = int(m.group(1))
+                rep = _live_rep_nowait()       # nunca bloquea el stream de frames
+                if rep is not None:
+                    win = rep.window(t - 6.0, t)   # margen: ns-3 vuelca con retraso
+                    msgs = {"tx": [], "rx": []}
+                    for kind in ("tx", "rx"):
+                        for e in win[kind]:
+                            key = (kind, e["tx"], e.get("rx"),
+                                   round(e["t"], 4), e["type"])
+                            if key in sent_v2x:
+                                continue
+                            sent_v2x.add(key)
+                            msgs[kind].append(e)
+                    if len(sent_v2x) > 20000:      # poda: solo claves recientes
+                        sent_v2x = {k for k in sent_v2x if k[3] > t - 12.0}
+                    if msgs["tx"] or msgs["rx"]:
+                        frame["messages"] = msgs
+            await ws.send_json(frame)
 
             if bridge.min_expected_number() <= 0:
                 await ws.send_json({"type": "end", "t": round(t, 1)})

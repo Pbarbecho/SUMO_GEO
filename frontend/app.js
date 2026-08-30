@@ -9,7 +9,6 @@ const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://")
 const els = {
   play: document.getElementById("btn-play"),
   reset: document.getElementById("btn-reset"),
-  level: document.getElementById("level"),
   fps: document.getElementById("fps"),
   fpsVal: document.getElementById("fps-val"),
   pad: document.getElementById("pantilt"),
@@ -37,10 +36,16 @@ const els = {
   replayBtn: document.getElementById("btn-replay"),
   replayBar: document.getElementById("replay-bar"),
   rpSeek: document.getElementById("rp-seek"),
-  rpTime: document.getElementById("rp-time"),
+  rpTimeCur: document.getElementById("rp-time-cur"),
+  rpTimeTotal: document.getElementById("rp-time-total"),
   rowMsgs: document.getElementById("row-msgs"),
   rowMsgFilter: document.getElementById("row-msg-filter"),
   stepRow: document.getElementById("replay-step-row"),
+  rowVehFilter: document.getElementById("row-veh-filter"),
+  rpSpeedRow: document.getElementById("rp-speed-row"),
+  rpSlow: document.getElementById("rp-slow"),
+  rpFast: document.getElementById("rp-fast"),
+  rpSpeed: document.getElementById("rp-speed"),
   rpStep: document.getElementById("rp-step"),
   rpBack: document.getElementById("rp-back"),
   rpPlay: document.getElementById("rp-play"),
@@ -51,6 +56,12 @@ const els = {
   fDenm: document.getElementById("f-denm"),
   arcLbl: document.getElementById("toggle-arc-lbl"),
   zen: document.getElementById("btn-zen"),
+  detect: document.getElementById("toggle-detect"),
+  sensorMode: document.getElementById("sensor-mode"),
+  followBadge: document.getElementById("follow-badge"),
+  followVeh: document.getElementById("follow-veh"),
+  followHud: document.getElementById("follow-hud"),
+  followExit: document.getElementById("follow-exit"),
 };
 
 // modo presentación: ocultar todos los paneles (solo mapa + simulación)
@@ -58,14 +69,39 @@ els.zen.onclick = () => document.body.classList.toggle("zen");
 
 // --- replay offline (mensajes V2X desde .pcap de VaN3Twin) -------------------
 let replayMode = false;        // conectar con ?replay=1
+let liveV2xSeen = false;       // llegaron mensajes V2X en modo vivo (pcap en caliente)
+let liveV2xTimer = null;       // refresco periódico del panel PHY en vivo
+let liveStations = new Set();  // estaciones vistas en vivo (opciones del filtro emisor)
 let replayT0 = 0, replayT1 = 0;
 let rpDragging = false;
 let showMsgs = true;
 let showArcLabels = true;      // etiqueta "N m · X dBm" sobre cada enlace
 let selStation = null;         // filtro: solo mensajes emitidos por esta estación
 let msgEvents = [];            // {kind:'tx'|'rx', type, wallT, simT, st, pos, pos2}
-const MSG_TTL = 900;           // ms de vida visual de un evento
+// vida visual de un evento (ms): los arcos TX→RX duran más que el pulso de
+// transmisión para que dé tiempo a verlos/clicarlos antes de desvanecerse
+const MSG_TTL_TX = 1200;       // pulso radial de transmisión
+const MSG_TTL_RX = 2600;       // arco de recepción (el que se inspecciona)
+const msgTtl = (e) => (e.kind === "tx" ? MSG_TTL_TX : MSG_TTL_RX);
+// radio final del pulso TX = alcance REAL medido en la corrida (range_m.p95
+// del panel PHY, cargado de /api/replay/info); fallback si aún no llegó
+let phyRangeM = null;
+const PULSE_FALLBACK_M = 150;
 const MSG_COLORS = { CAM: [77, 163, 255], CPM: [55, 200, 113], DENM: [255, 83, 71] };
+// barra de tiempo del replay: formato m:ss + relleno de progreso del <input
+// type=range> (el navegador ignora `background` en el thumb/track nativos,
+// así que el degradado se recalcula a mano en cada cambio de valor).
+function fmtClock(s) {
+  s = Math.max(0, Math.round(s || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+function updateSeekFill() {
+  const el = els.rpSeek;
+  if (!el) return;
+  const min = Number(el.min) || 0, max = Number(el.max) || 100, val = Number(el.value);
+  const pct = max > min ? Math.max(0, Math.min(100, ((val - min) / (max - min)) * 100)) : 0;
+  el.style.background = `linear-gradient(to right, var(--accent) ${pct}%, var(--line) ${pct}%)`;
+}
 function msgFilterOn(type) {
   if (type === "CAM") return els.fCam.checked;
   if (type === "CPM") return els.fCpm.checked;
@@ -91,6 +127,14 @@ let vehicles = [];        // latest frame vehicles (interpolados para el render)
 // interpola posición y rumbo a ritmo de requestAnimationFrame.
 const INTERP_MAX_VEH = 1500;   // por encima, refresco directo (escenarios masivos)
 const INTERP_MAX_JUMP = 80;    // m; salto mayor = teletransporte/reinserción -> no interpolar
+// Factor de estiramiento de la ventana de interpolación. interpPeriod es una
+// MEDIA móvil del intervalo entre frames: la mitad de los frames llegan más
+// tarde que la media (jitter), el vehículo alcanzaba su objetivo antes de
+// tiempo y se quedaba PARADO esperando -> movimiento avanza-y-para. Con la
+// ventana estirada el movimiento nunca se agota; como cada frame nuevo
+// reinicia la interpolación desde la posición DIBUJADA, el pequeño retraso se
+// recupera solo, sin saltos (mismo enfoque que "render one interval behind").
+const INTERP_STRETCH = 1.30;
 let frameVehicles = [];        // último frame recibido (crudo)
 let interpPrev = new Map();    // id -> {lon,lat,angle} dibujados en el frame anterior
 let interpT0 = 0;              // performance.now() del último frame
@@ -118,7 +162,7 @@ function interpTick() {
   requestAnimationFrame(interpTick);
   const now = performance.now();
   if (now - interpLastDraw < interpMinInterval(frameVehicles.length)) return;
-  const t = interpT0 ? Math.min((now - interpT0) / interpPeriod, 1) : 1;
+  const t = interpT0 ? Math.min((now - interpT0) / (interpPeriod * INTERP_STRETCH), 1) : 1;
   const needVeh = !paused && frameVehicles.length > 0 &&
     frameVehicles.length <= INTERP_MAX_VEH && t < 1;
   // animar fade aunque no haya interp.; en modo paso (congelado) no hace falta
@@ -158,9 +202,21 @@ function hexToRgb(h) {
 // coloured with a believable car palette; buses in transit orange. Congestion
 // is carried by the road colour (LOS), so vehicle colour stays realistic.
 let labelLayerId = null;   // first basemap symbol layer -> draw data beneath labels
+// Paleta "atardecer andino": tonos medios/cálidos originales, pensados para el
+// tinte MULTIPLICATIVO sobre la carrocería gris claro del .glb (colores muy
+// oscuros dejarían los coches como manchas negras) y para distinguirse bien
+// sobre el mapa claro y los paneles azul UCuenca.
 const CAR_COLORS = [
-  [236, 237, 240], [30, 33, 38], [180, 184, 190], [108, 114, 122],
-  [178, 44, 44], [40, 74, 142], [26, 40, 62], [156, 128, 74], [64, 112, 86],
+  [246, 240, 226],   // crema perlado
+  [224, 122, 95],    // terracota
+  [240, 190, 70],    // mostaza
+  [140, 178, 128],   // salvia
+  [64, 180, 166],    // turquesa andino
+  [70, 110, 200],    // cobalto
+  [150, 96, 160],    // ciruela
+  [242, 140, 130],   // coral
+  [120, 138, 160],   // pizarra azulada
+  [190, 100, 50],    // cobre quemado
 ];
 const BUS_COLOR = [250, 150, 20];
 function hashId(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h; }
@@ -218,6 +274,80 @@ function vehicleParts(d) {
     { polygon: partRect(d, L, W, 0.47, 0.05, 0.84), height: 0.62, color: HEADLIGHT },    // headlights
     { polygon: partRect(d, L, W, -0.48, 0.045, 0.84), height: 0.64, color: TAILLIGHT },  // taillights
   ];
+}
+
+// --- vehículos como modelos glTF instanciados (deck.ScenegraphLayer) --------
+// Un .glb low-poly por clase (frontend/models/, generados proceduralmente:
+// silueta con capó, parabrisas, ruedas y luces; ~300 tris). Instancing GPU:
+// por vehículo solo se suben posición/orientación/escala — MÁS rápido que las
+// cajas extruidas (que regeneraban 8 polígonos por vehículo por tick en CPU).
+// Modelos construidos Z-up con el morro hacia +Y (norte) a tamaño real.
+// Fallback automático a cajas si la capa no existe en el bundle, si falla la
+// carga de un .glb o con flotas enormes.
+// Kenney Car Kit (kenney.nl, licencia CC0) convertido a nuestra convención
+// (Z-up, morro +Y, suelo z=0) — ver script de conversión en el contexto. Los
+// modelos traen su color en TEXTURA (la paleta CAR_COLORS ya no los tiñe;
+// queda para el fallback de cajas). Variedad: variante elegida por hash del
+// id, estable entre frames. Sin bus en el kit -> se conserva el procedural.
+// Si los coches aparecieran marcha atrás, poner yawOff: 180 en los kenney.
+const VEH_MODELS = {
+  car: [
+    { url: "models/kenney/sedan.glb",            len: 2.55, wid: 1.50 },
+    { url: "models/kenney/suv.glb",              len: 2.70, wid: 1.50 },
+    { url: "models/kenney/taxi.glb",             len: 2.75, wid: 1.50 },
+    { url: "models/kenney/van.glb",              len: 2.75, wid: 1.50 },
+    { url: "models/kenney/hatchback-sports.glb", len: 2.85, wid: 1.30 },
+  ],
+  bus:       [{ url: "models/bus.glb",              len: 12.12, wid: 2.54 }],
+  emergency: [{ url: "models/kenney/ambulance.glb", len: 3.25,  wid: 1.50 }],
+};
+const MODEL_MAX_VEH = 3000;
+// SUMO da rumbo 0=N horario; el yaw de deck es antihorario alrededor de Z.
+// Si al probar el modelo apareciera girado, ajustar SOLO esta función.
+const MODEL_YAW = (a) => -(a || 0);
+// requiere ScenegraphLayer (bundle deck) Y GLTFLoader (bundle @loaders.gl/gltf,
+// global `loaders` — en deck.gl 9 el cargador glTF NO viene en dist.min.js)
+let vehModelsOk = typeof deck !== "undefined" && !!deck.ScenegraphLayer &&
+                  typeof loaders !== "undefined" && !!loaders.GLTFLoader;
+
+function vehClass(d) {
+  if (/emergency|ambulan|police|firebrigade|rescue/i.test(d.type || "")) return "emergency";
+  if (isBus(d)) return "bus";
+  return "car";
+}
+function makeVehicleModelLayers() {
+  // una capa por VARIANTE de modelo (instancing por .glb); la variante de cada
+  // vehículo sale del hash de su id -> estable entre frames
+  const groups = new Map();
+  for (const v of vehicles) {
+    const k = vehClass(v);
+    const vars = VEH_MODELS[k];
+    const i = vars.length > 1 ? hashId(v.id) % vars.length : 0;
+    let g = groups.get(k + "-" + i);
+    if (!g) groups.set(k + "-" + i, g = { m: vars[i], data: [] });
+    g.data.push(v);
+  }
+  const out = [];
+  for (const [key, g] of groups) {
+    const m = g.m;
+    out.push(new deck.ScenegraphLayer({
+      id: "veh-glb-" + key,
+      data: g.data,
+      scenegraph: m.url,             // misma URL entre ticks -> no se recarga
+      loaders: [loaders.GLTFLoader],
+      getPosition: (d) => [d.lon, d.lat, 0],
+      getOrientation: (d) => [0, MODEL_YAW(d.angle) + (m.yawOff || 0), 0],
+      getScale: (d) => {
+        const s = (d.len || m.len) / m.len;
+        return [(d.wid || m.wid) / m.wid, s, (s + 1) / 2];
+      },
+      sizeScale: 1,
+      _lighting: "pbr",
+      pickable: true,
+      onError: () => { vehModelsOk = false; refreshLayers(); },
+    }));
+  }
+  return out;
 }
 
 // LOD: with thousands of vehicles (or zoomed far out) the small parts are
@@ -305,6 +435,24 @@ function applyLightPreset(name) {
     const b = els["light_" + k];
     if (b) b.classList.toggle("active", k === name);
   }
+}
+
+// --- sensor looks (inspirado en gods-eye-view: CRT/NVG/FLIR re-tiñen toda la
+// escena) — aquí como filtro CSS sobre #map (mapa + overlay deck.gl comparten
+// el mismo elemento), sin shaders GLSL adicionales: mismo efecto visual,
+// cero coste de mantenimiento en un stack "sin build step".
+const SENSOR_MODES = {
+  normal: { filter: "none", scan: false },
+  nvg:    { filter: "brightness(1.3) contrast(1.15) saturate(4.5) sepia(.55) hue-rotate(68deg)", scan: false },
+  flir:   { filter: "grayscale(1) invert(1) contrast(1.35) sepia(1) hue-rotate(190deg) saturate(5)", scan: false },
+  noir:   { filter: "grayscale(1) contrast(1.35) brightness(.92)", scan: false },
+  crt:    { filter: "contrast(1.12) saturate(1.3) brightness(1.03)", scan: true },
+};
+function applySensorMode(name) {
+  const m = SENSOR_MODES[name] || SENSOR_MODES.normal;
+  const mapEl = document.getElementById("map");
+  if (mapEl) mapEl.style.filter = m.filter;
+  document.body.dataset.sensor = m.scan ? "crt" : "";
 }
 
 // Re-theme the OpenFreeMap basemap to the exact Mapbox Standard "day" palette.
@@ -468,8 +616,12 @@ async function boot() {
     bearing: -18,
     antialias: true,
   });
-  map.on("dragstart", stopOrbit);       // any manual pan/rotate cancels auto-orbit
-  map.on("rotatestart", stopOrbit);
+  // cancelar órbita/seguimiento SOLO con gestos del usuario. OJO: jumpTo/setBearing
+  // disparan "rotatestart" también (programático, sin originalEvent) — sin el
+  // guard, el propio jumpTo de la cámara cockpit cancelaba el seguimiento en el
+  // primer frame (por eso "no funcionaba").
+  map.on("dragstart", () => { stopOrbit(); stopFollow(); });
+  map.on("rotatestart", (e) => { if (e && e.originalEvent) { stopOrbit(); stopFollow(); } });
   map.on("rotate", syncPad);            // keep the Pan-Tilt pad in sync with gestures/orbit
   map.on("pitch", syncPad);
   map.on("moveend", syncPad);
@@ -546,6 +698,14 @@ let _casingLayer = null, _laneLayer = null;
 // capa (reconstruir las ~10 capas restantes a 60 fps mataba el rendimiento
 // con flotas grandes).
 function makeVehiclesLayer() {
+  // camino preferente: modelos glTF instanciados; cajas como fallback/escala
+  if (vehModelsOk && vehicles.length <= MODEL_MAX_VEH) {
+    try { return makeVehicleModelLayers(); } catch (e) { vehModelsOk = false; }
+  }
+  return [makeVehicleBoxLayer()];
+}
+
+function makeVehicleBoxLayer() {
   const detailed = vehicles.length <= LOD_MAX_DETAILED
     && (!map || map.getZoom() >= LOD_MIN_ZOOM);
   const mkParts = detailed ? vehicleParts : vehicleLod;
@@ -562,6 +722,49 @@ function makeVehiclesLayer() {
     pickable: true,
     updateTriggers: { getPolygon: [vehicles, detailed], getElevation: [vehicles, detailed], getFillColor: [vehicles, detailed] },
   });
+}
+
+// --- overlay de detección (inspirado en el HUD "detection mesh" de
+// gods-eye-view): caja + ID sobre cada vehículo, como si un nodo V2X lo
+// estuviera "viendo". Reutiliza partRect() ya existente para el rectángulo.
+let showDetection = false;
+const DETECT_COLOR = [80, 255, 140];
+function makeDetectionLayer() {
+  if (!showDetection || vehicles.length === 0 || vehicles.length > LOD_MAX_DETAILED) return [];
+  const data = vehicles.map((d) => {
+    const L = d.len || (isBus(d) ? 12 : 4.5);
+    const W = d.wid || (isBus(d) ? 2.55 : 1.8);
+    const box = partRect(d, L * 1.25, W * 1.7, 0, 1, 1);
+    const h = (isBus(d) ? 3.0 : 1.6);
+    return { veh: d, path: [...box, box[0]].map(([lon, lat]) => [lon, lat, h]), h };
+  });
+  return [
+    new deck.PathLayer({
+      id: "detect-box",
+      data,
+      getPath: (d) => d.path,
+      getColor: [...DETECT_COLOR, 220],
+      getWidth: 1.6, widthUnits: "pixels",
+      pickable: false,
+      parameters: { depthTest: false },
+      updateTriggers: { getPath: [vehicles] },
+    }),
+    new deck.TextLayer({
+      id: "detect-label",
+      data,
+      billboard: true,
+      getPosition: (d) => [d.veh.lon, d.veh.lat, d.h + 1.1],
+      getText: (d) => d.veh.station != null ? `veh${d.veh.station}` : d.veh.id,
+      getSize: 10.5, sizeUnits: "pixels",
+      getColor: [...DETECT_COLOR, 235],
+      background: true,
+      getBackgroundColor: [8, 24, 14, 175],
+      backgroundPadding: [3, 1],
+      getTextAnchor: "middle", getAlignmentBaseline: "bottom",
+      parameters: { depthTest: false },
+      updateTriggers: { getPosition: [vehicles], getText: [vehicles] },
+    }),
+  ];
 }
 
 function buildLayers() {
@@ -653,7 +856,7 @@ function buildLayers() {
     }));
   }
 
-  layers.push(makeVehiclesLayer());
+  layers.push(...makeVehiclesLayer());
 
   // busy streets: a beacon marker on every street whose current vehicle count
   // reaches the selector threshold (busyMin)
@@ -728,24 +931,34 @@ function buildLayers() {
 }
 
 // Capas animadas de mensajes V2X (replay): pulso radial en cada TX + arco
-// TX->RX por recepción, ambos desvaneciéndose en MSG_TTL ms.
+// TX->RX por recepción, cada uno desvaneciéndose en su TTL (msgTtl).
 function makeMessageLayers(now) {
   // en pausa (modo paso a paso) los mensajes NO se desvanecen: quedan fijos
   // en pantalla para poder inspeccionarlos con clic
   const frozen = replayMode && paused;
-  if (!frozen) msgEvents = msgEvents.filter((e) => now - e.wallT < MSG_TTL);
+  if (!frozen) msgEvents = msgEvents.filter((e) => now - e.wallT < msgTtl(e));
   if (!showMsgs || msgEvents.length === 0) return [];
+  // re-anclar pulsos/arcos a la posición DIBUJADA del vehículo en este tick:
+  // los eventos capturan la posición cruda del frame, pero los vehículos se
+  // pintan interpolados (~medio período atrás) — sin esto los arcos iban
+  // "adelantados" a los vehículos. Fallback: posición capturada (veh que salió).
+  const drawn = {};
+  for (const v of vehicles) if (v.station != null) drawn[v.station] = [v.lon, v.lat];
   const pulses = [], arcs = [];
   for (const e of msgEvents) {
     if (!msgFilterOn(e.type)) continue;
     if (selStation !== null && e.st !== selStation) continue;
-    const prog = frozen ? 0.35 : (now - e.wallT) / MSG_TTL; // 0..1
+    const prog = frozen ? 0.35 : (now - e.wallT) / msgTtl(e); // 0..1
     const c = MSG_COLORS[e.type] || [200, 200, 200];
     if (e.kind === "tx") {
-      pulses.push({ ...e, radius: 8 + 140 * prog,
-                    color: [...c, Math.round(170 * (1 - prog))] });
+      // expansión hasta el alcance medido; alfa alto y desvanecimiento suave
+      // (solo cae al 30% al final) para que el anillo sea visible todo su ciclo
+      const R = phyRangeM || PULSE_FALLBACK_M;
+      pulses.push({ ...e, pos: drawn[e.st] || e.pos, radius: 8 + (R - 8) * prog,
+                    color: [...c, Math.round(220 * (1 - 0.7 * prog))] });
     } else if (e.pos2) {
-      arcs.push({ ...e, color: [...c, Math.round(150 * (1 - prog))] });
+      arcs.push({ ...e, pos: drawn[e.st] || e.pos, pos2: drawn[e.st2] || e.pos2,
+                  color: [...c, Math.round(150 * (1 - prog))] });
     }
   }
   const out = [];
@@ -780,7 +993,7 @@ function makeMessageLayers(now) {
     id: "v2x-pulse", data: pulses, stroked: true, filled: false,
     getPosition: (d) => d.pos, getRadius: (d) => d.radius,
     radiusUnits: "meters", getLineColor: (d) => d.color,
-    getLineWidth: 2.5, lineWidthUnits: "pixels",
+    getLineWidth: 3.2, lineWidthUnits: "pixels",
     pickable: true,                    // clic = contenido del mensaje
     parameters: { depthTest: false },
   }));
@@ -806,38 +1019,53 @@ function makeHighlightLayer() {
   })];
 }
 
-const DYN_IDS = new Set(["vehicles", "veh-selected", "v2x-pulse", "v2x-arc", "v2x-arc-lbl"]);
+const DYN_IDS = new Set(["vehicles", "veh-selected", "v2x-pulse", "v2x-arc", "v2x-arc-lbl",
+                          "detect-box", "detect-label"]);
+// las capas de modelos glTF llevan id dinámico "veh-glb-<clase>-<variante>"
+const isDynLayer = (id) => DYN_IDS.has(id) || id.startsWith("veh-glb-");
 
 function refreshLayers() {
   if (!overlay) return;
   refreshLayers._last = [...buildLayers(), ...makeHighlightLayer(),
-                         ...makeMessageLayers(performance.now())];
+                         ...makeMessageLayers(performance.now()), ...makeDetectionLayer()];
   overlay.setProps({ layers: refreshLayers._last });
+  updateFollowCamera();
 }
 
 // Refresco barato para los ticks de animación: solo se reconstruyen las capas
-// dinámicas (vehículos y mensajes); el resto se reutiliza por identidad.
+// dinámicas (vehículos, mensajes y detección). El resto se reutiliza por identidad.
 function refreshDynamicLayers() {
   if (!overlay) return;
   if (!refreshLayers._last) { refreshLayers(); return; }
-  const statics = refreshLayers._last.filter((l) => l && !DYN_IDS.has(l.id));
-  refreshLayers._last = [...statics, makeVehiclesLayer(), ...makeHighlightLayer(),
-                         ...makeMessageLayers(performance.now())];
+  const statics = refreshLayers._last.filter((l) => l && !isDynLayer(l.id));
+  refreshLayers._last = [...statics, ...makeVehiclesLayer(), ...makeHighlightLayer(),
+                         ...makeMessageLayers(performance.now()), ...makeDetectionLayer()];
   overlay.setProps({ layers: refreshLayers._last });
+  updateFollowCamera();
 }
 
 // --- right-click inspector: live SUMO stats for the picked object ------------
 const TL_CODE = { G: "verde (prioridad)", g: "verde", y: "ámbar", Y: "ámbar",
                   u: "rojo-ámbar", r: "rojo", s: "rojo (stop)", o: "apagado" };
+// vehículo bajo el pick, venga de la capa de cajas (pieza con .veh) o de una
+// capa glTF (el objeto ES el vehículo)
+function pickedVehicle(info) {
+  if (info.layer.id === "vehicles" && info.object.veh) return info.object.veh;
+  if (/^veh-glb-/.test(info.layer.id)) return info.object;
+  return null;
+}
+
 function inspectorHtml(info) {
   const o = info.object;
-  if (info.layer.id === "vehicles" && o.veh) {
-    const d = o.veh;
+  const veh = pickedVehicle(info);
+  if (veh) {
+    const d = veh;
     return `<h3>Vehículo ${d.id}</h3>` +
       `Tipo: <b>${d.type}</b><br>` +
       `Velocidad: <b>${Math.round(d.speed * 3.6)} km/h</b> · Rumbo: <b>${Math.round(d.angle)}°</b><br>` +
       `Dimensiones: <b>${d.len} × ${d.wid} m</b><br>` +
       `Calle (edge): <b>${d.edge}</b>` +
+      `<button id="popup-follow" style="margin-top:8px;width:100%;pointer-events:auto">🎥 Seguir este vehículo</button>` +
       `<div id="popup-extra" style="margin-top:6px;border-top:1px solid #1c4370;padding-top:6px;opacity:.8">cargando estadísticas…</div>`;
   }
   if (info.layer.id === "network") {
@@ -974,9 +1202,12 @@ function setupInspector() {
     popup.style.left = Math.min(e.clientX + 12, window.innerWidth - 290) + "px";
     popup.style.top = Math.min(e.clientY + 12, window.innerHeight - 230) + "px";
     // vehicle? -> ask the backend for the extended SUMO stats over the same WS
-    if (info.layer.id === "vehicles" && info.object.veh) {
-      pendingInspect = info.object.veh.id;
+    const veh = pickedVehicle(info);
+    if (veh) {
+      pendingInspect = veh.id;
       send({ cmd: "inspect", id: pendingInspect });
+      const fb = document.getElementById("popup-follow");
+      if (fb) fb.onclick = () => { startFollow(veh.id); popup.style.display = "none"; };
     } else {
       pendingInspect = null;
     }
@@ -1047,8 +1278,40 @@ function connect() {
         losStamp++; lastLosMs = now;
       }
       tlState = msg.tls || {};
-      // eventos de mensajes V2X (solo replay): capturar posiciones AHORA para
-      // que pulso/arco queden anclados aunque el vehículo siga moviéndose
+      // mensajes V2X en vivo: al llegar los primeros, revelar los controles
+      // de mensajes y el panel PHY (estadísticas de la corrida EN CURSO,
+      // refrescadas periódicamente vía /api/replay/info?live=1)
+      if (!replayMode && msg.messages && !liveV2xSeen) {
+        liveV2xSeen = true;
+        els.rowMsgs.style.display = "";
+        els.rowMsgFilter.style.display = "";
+        els.rowVehFilter.style.display = "";
+        const pp = document.getElementById("phy-panel");
+        if (pp) { pp.style.display = ""; loadPhyStats(0, true); }
+        if (liveV2xTimer) clearInterval(liveV2xTimer);
+        liveV2xTimer = setInterval(() => { if (liveV2xSeen) loadPhyStats(0, true); }, 15000);
+      }
+      // filtro de emisor en vivo: poblar el selector con las estaciones que
+      // van apareciendo (los vehículos traen station del backend), conservando
+      // la selección actual si sigue existiendo
+      if (!replayMode && liveV2xSeen) {
+        let changed = false;
+        for (const v of msg.vehicles) {
+          if (v.station != null && !liveStations.has(v.station)) {
+            liveStations.add(v.station); changed = true;
+          }
+        }
+        if (changed) {
+          const cur = els.vehFilter.value;
+          els.vehFilter.innerHTML = '<option value="">All</option>' +
+            [...liveStations].sort((a, b) => a - b)
+              .map((s) => `<option value="${s}">veh${s}</option>`).join("");
+          els.vehFilter.value = cur;
+          if (els.vehFilter.value !== cur) { els.vehFilter.value = ""; selStation = null; }
+        }
+      }
+      // eventos de mensajes V2X (replay y en vivo): capturar posiciones AHORA
+      // para que pulso/arco queden anclados aunque el vehículo siga moviéndose
       if (msg.messages && showMsgs) {
         if (replayMode && paused) msgEvents = [];   // modo paso: solo ESTE paso
         const posOf = {};
@@ -1062,15 +1325,15 @@ function connect() {
           const pt = posOf[e.tx], pr = posOf[e.rx];
           if (pt && pr) {
             msgEvents.push({ kind: "rx", type: e.type, simT: e.t, st: e.tx,
-              pos: pt, pos2: pr, wallT: wall, rssi: e.rssi,
+              st2: e.rx, pos: pt, pos2: pr, wallT: wall, rssi: e.rssi,
               dist: Math.round(metersBetween(pt[0], pt[1], pr[0], pr[1])) });
           }
         }
         if (msgEvents.length > 3000) msgEvents = msgEvents.slice(-3000);
       }
       if (replayMode) {
-        els.rpTime.textContent = `${msg.t}s / ${Math.round(replayT1)}s`;
-        if (!rpDragging) els.rpSeek.value = msg.t;
+        els.rpTimeCur.textContent = fmtClock(msg.t);
+        if (!rpDragging) { els.rpSeek.value = msg.t; updateSeekFill(); }
       }
       if (msg.stats) updateHistory(msg.stats, frameVehicles.length, msg.t);
       els.vehCount.textContent = frameVehicles.length;
@@ -1078,14 +1341,28 @@ function connect() {
       refreshLayers();
     } else if (msg.type === "meta") {
       const isReplay = msg.mode === "replay";
+      liveV2xSeen = false;                       // nueva conexión: re-detectar V2X en vivo
+      if (liveV2xTimer) { clearInterval(liveV2xTimer); liveV2xTimer = null; }
+      liveStations = new Set();
+      if (!isReplay) {                           // filtro emisor limpio para la corrida nueva
+        els.vehFilter.innerHTML = '<option value="">All</option>';
+        selStation = null;
+      }
       els.replayBar.style.display = isReplay ? "" : "none";
       els.stepRow.style.display = isReplay ? "" : "none";
+      els.rowVehFilter.style.display = isReplay ? "" : "none";
+      els.rpSpeedRow.style.display = isReplay ? "" : "none";
+      if (msg.step_length) metaStepLength = msg.step_length;
+      if (isReplay) { rpMultIdx = 2; applyReplaySpeed(); }   // arrancar a 1× real
       els.rowMsgs.style.display = isReplay ? "" : "none";
       els.rowMsgFilter.style.display = isReplay ? "" : "none";
       if (isReplay) {
         replayT0 = msg.t0 || 0; replayT1 = msg.t1 || 0;
         els.rpSeek.min = replayT0; els.rpSeek.max = replayT1;
         els.rpSeek.value = replayT0;
+        els.rpTimeCur.textContent = fmtClock(replayT0);
+        els.rpTimeTotal.textContent = fmtClock(replayT1);
+        updateSeekFill();
         els.conn.textContent = "replay pcap";
         // selector de vehículo emisor (stationID reales de la corrida)
         const st = (msg.replay && msg.replay.stations) || [];
@@ -1136,14 +1413,6 @@ els.reset.onclick = () => {
   paused = false; els.play.textContent = "⏸ Pausar";
   connect();
 };
-els.level.onchange = () => {
-  currentLevel = els.level.value;                 // switch scenario -> reconnect
-  if (ws) ws.close();
-  vehicles = []; frameVehicles = []; interpPrev = new Map(); interpT0 = 0;
-  edgeColors = {}; tlState = {}; refreshLayers();
-  paused = false; els.play.textContent = "⏸ Pausar";
-  connect();
-};
 els.fps.oninput = () => {
   els.fpsVal.textContent = `${els.fps.value} fps`;
   send({ cmd: "speed", fps: Number(els.fps.value) });
@@ -1160,6 +1429,8 @@ els.replayBtn.onclick = () => {
   if (!replayMode) {
     els.replayBar.style.display = "none";
     els.stepRow.style.display = "none";
+    els.rowVehFilter.style.display = "none";
+    els.rpSpeedRow.style.display = "none";
     els.rowMsgs.style.display = "none";
     els.rowMsgFilter.style.display = "none";
     const pp = document.getElementById("phy-panel");
@@ -1186,9 +1457,31 @@ els.vehFilter.onchange = () => {
   selStation = els.vehFilter.value === "" ? null : Number(els.vehFilter.value);
   refreshLayers();
 };
+// velocidad de reproducción del replay: multiplicador sobre TIEMPO REAL.
+// Cadencia de render FIJA a 10 fps (como el modo vivo, que se ve fluido) y lo
+// que varía es el avance simulado por frame: mult/10 s (1× -> 0.1 s/frame).
+// El primer intento (2 fps × 0.5 s a 1×) era matemáticamente correcto pero
+// interpolar tramos de 500 ms se veía robótico y con micro-pausas; las
+// trayectorias del pcap son continuas, así que el backend puede muestrear a
+// cualquier paso (cmd "speed" acepta "step" — requiere backend reconstruido).
+const RP_RENDER_FPS = 10;
+const RP_MULTS = [0.25, 0.5, 1, 2, 4];
+let rpMultIdx = 2;                                 // 1× por defecto
+let metaStepLength = 0.5;                          // se actualiza con el meta del WS
+function applyReplaySpeed() {
+  const m = RP_MULTS[rpMultIdx];
+  els.rpSpeed.textContent = (m < 1 ? String(m).replace("0.", ".") : m) + "×";
+  send({ cmd: "speed", fps: RP_RENDER_FPS, step: m / RP_RENDER_FPS });
+  // sembrar el período esperado: la media móvil tardaba ~10 frames en
+  // converger tras cada cambio de cadencia y mientras tanto tartamudeaba
+  interpPeriod = 1000 / RP_RENDER_FPS;
+}
+els.rpSlow.onclick = () => { if (rpMultIdx > 0) { rpMultIdx--; applyReplaySpeed(); } };
+els.rpFast.onclick = () => { if (rpMultIdx < RP_MULTS.length - 1) { rpMultIdx++; applyReplaySpeed(); } };
 els.rpSeek.oninput = () => {
   rpDragging = true;
-  els.rpTime.textContent = `${els.rpSeek.value}s / ${Math.round(replayT1)}s`;
+  els.rpTimeCur.textContent = fmtClock(els.rpSeek.value);
+  updateSeekFill();
   send({ cmd: "seek", t: Number(els.rpSeek.value) });
   interpPrev = new Map(); interpT0 = 0; msgEvents = [];   // sin interpolar el salto
 };
@@ -1226,13 +1519,14 @@ document.getElementById("map").addEventListener("click", (e) => {
 // panel PHY 802.11p: métricas de la corrida derivadas de los pcap.
 // Con reintentos: justo tras un build/up el backend puede tardar unos
 // segundos (nginx devuelve su página HTML de error 502 mientras tanto).
-async function loadPhyStats(attempt = 0) {
+async function loadPhyStats(attempt = 0, live = false) {
   const body = document.getElementById("phy-body");
   if (!body) return;
   const retry = () => { body.textContent = `cargando estadísticas… (intento ${attempt + 2})`;
-                        setTimeout(() => loadPhyStats(attempt + 1), 2500); };
+                        setTimeout(() => loadPhyStats(attempt + 1, live), 2500); };
   try {
-    const res = await fetch(API + "/api/replay/info", { cache: "no-store" });
+    const res = await fetch(API + "/api/replay/info" + (live ? "?live=1" : ""),
+                            { cache: "no-store" });
     const ct = res.headers.get("content-type") || "";
     if (res.status === 404) {
       body.textContent = "el backend no tiene /api/replay/info: reconstrúyelo " +
@@ -1250,6 +1544,7 @@ async function loadPhyStats(attempt = 0) {
     const p = info.phy || {};
     const f = (x, d = 1) => (x == null ? "–" : Number(x).toFixed(d));
     const c = p.config || {}, l = p.latency_ms || {}, r = p.range_m || {};
+    phyRangeM = r.p95 || r.max || null;   // el pulso TX se expande hasta aquí
     const pdrOne = (o) => { const k = Object.keys(o || {})[0];
                             return k ? `${k.replace("->", "→")}: ${(o[k] * 100).toFixed(1)}%` : "–"; };
     const rates = Object.entries(p.rates_per_s || {})
@@ -1318,6 +1613,8 @@ els.tl.onchange = () => { showTL = els.tl.checked; refreshLayers(); };
 els.poi.onchange = () => setPoiVisible(els.poi.checked);
 els.busy.onchange = () => { showBusy = els.busy.checked; refreshLayers(); };
 els.busyMin.oninput = () => { busyMin = Number(els.busyMin.value); els.busyVal.textContent = busyMin; refreshLayers(); };
+els.detect.onchange = () => { showDetection = els.detect.checked; refreshLayers(); };
+els.sensorMode.onchange = () => applySensorMode(els.sensorMode.value);
 
 // --- unified Pan-Tilt pad: X = bearing (pan), Y = pitch (tilt) --------------
 const PITCH_MAX = 85;
@@ -1341,7 +1638,7 @@ function padPoint(ev) {                   // pointer -> bearing (X) + pitch (Y)
   const nx = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width));
   const ny = Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height));
   if (map) {
-    stopOrbit();
+    stopOrbit(); stopFollow();
     map.setBearing((nx * 2 - 1) * 180);     // left -180 .. right +180 (centre = north)
     map.setPitch((1 - ny) * PITCH_MAX);     // top = horizon (85°), bottom = top-down (0°)
     syncPad();                              // knob follows the (clamped) camera
@@ -1364,10 +1661,43 @@ function stopOrbit() {
 els.orbit.onclick = () => {
   if (!map) return;
   if (orbitRAF) { stopOrbit(); return; }        // toggle off
+  stopFollow();
   els.orbit.classList.add("active");            // start a slow continuous orbit
   const spin = () => { map.setBearing(map.getBearing() + 0.15); orbitRAF = requestAnimationFrame(spin); };
   orbitRAF = requestAnimationFrame(spin);
 };
+
+// --- cámara "cockpit" (inspirado en gods-eye-view: ride inside a tracked
+// vehicle) — sigue a un vehículo por id, orientada a su rumbo real (SUMO usa
+// la misma convención 0=N horario que el bearing de MapLibre: sin conversión).
+let followId = null, followPrevCam = null;
+function startFollow(id) {
+  if (!map) return;
+  if (!followPrevCam) {
+    followPrevCam = { center: map.getCenter(), zoom: map.getZoom(),
+                       bearing: map.getBearing(), pitch: map.getPitch() };
+  }
+  stopOrbit();
+  followId = id;
+  els.followBadge.style.display = "flex";
+  els.followVeh.textContent = id;
+}
+function stopFollow() {
+  if (followId === null) return;
+  followId = null;
+  els.followBadge.style.display = "none";
+  if (followPrevCam) { map.easeTo({ ...followPrevCam, duration: 500 }); followPrevCam = null; }
+}
+els.followExit.onclick = stopFollow;
+// Se llama en cada tick de interpolación (misma cadencia que el movimiento de
+// los vehículos) para que la cámara vaya tan fluida como el propio tráfico.
+function updateFollowCamera() {
+  if (followId === null || !map) return;
+  const v = vehicles.find((x) => x.id === followId);
+  if (!v) { stopFollow(); return; }              // el vehículo salió de la simulación
+  map.jumpTo({ center: [v.lon, v.lat], bearing: v.angle || 0, pitch: 76, zoom: 19.3 });
+  els.followHud.textContent = `· rumbo ${Math.round(v.angle || 0)}° · ${Math.round((v.speed || 0) * 3.6)} km/h`;
+}
 
 // --- zoom -----------------------------------------------------------------
 els.zoomIn.onclick = () => map && map.zoomIn();

@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     replay_dir: str = "/replay"            # carpeta con v2v-*-<n>-0.pcap
     replay_pattern: str = "*.pcap"
     asn_dir: str = "/ns3/ns-3-dev/src/automotive/model/ASN1"
+
+    # --- Mensajes V2X EN VIVO (corrida VaN3Twin en curso) --------------------
+    # ns-3 escribe los pcap en su directorio de trabajo DURANTE la corrida y el
+    # backend ya monta ese volumen RO en /ns3: se relee el índice en caliente
+    # (huella mtime/size, re-parse en thread) y los eventos TX/RX se adjuntan a
+    # los frames del modo en vivo. Vacío = desactivado.
+    live_pcap_dir: str = "/ns3/ns-3-dev"
+    live_refresh_s: float = 2.0            # cadencia mínima de re-chequeo del índice
     use_libsumo: bool = False                  # use in-process libsumo if available
     step_length: float = 1.0                   # seconds per simulation step
 
