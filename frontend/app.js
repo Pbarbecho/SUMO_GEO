@@ -838,7 +838,7 @@ function inspectorHtml(info) {
       `Velocidad: <b>${Math.round(d.speed * 3.6)} km/h</b> · Rumbo: <b>${Math.round(d.angle)}°</b><br>` +
       `Dimensiones: <b>${d.len} × ${d.wid} m</b><br>` +
       `Calle (edge): <b>${d.edge}</b>` +
-      `<div id="popup-extra" style="margin-top:6px;border-top:1px solid #2c3644;padding-top:6px;opacity:.8">cargando estadísticas…</div>`;
+      `<div id="popup-extra" style="margin-top:6px;border-top:1px solid #1c4370;padding-top:6px;opacity:.8">cargando estadísticas…</div>`;
   }
   if (info.layer.id === "network") {
     const p = o.properties, s = edgeStats[p.id];
@@ -907,7 +907,7 @@ function drawSeries(canvasId, seriesArr, colors) {
   // time axis (simulated clock) — start / middle / end of the visible window
   const ts = hist.t;
   if (ts.length > 1) {
-    ctx.strokeStyle = "#2c3644";
+    ctx.strokeStyle = "#1c4370";
     ctx.beginPath(); ctx.moveTo(0, plotH + 0.5); ctx.lineTo(W, plotH + 0.5); ctx.stroke();
     ctx.fillStyle = "#8b95a5";
     ctx.font = "9px system-ui, sans-serif";

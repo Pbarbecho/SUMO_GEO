@@ -1,4 +1,16 @@
-:root { --bg:#11151c; --panel:#1b222dee; --fg:#e8edf2; --accent:#4da3ff; }
+/* Paleta institucional Universidad de Cuenca:
+   azul #002856 · rojo #A51008 (mismos colores que los documentos LaTeX) */
+:root {
+  --ucu-azul: #002856;
+  --ucu-rojo: #A51008;
+  --bg: #001229;             /* fondo bajo el mapa: azul UCuenca muy oscuro */
+  --panel: #002856e6;        /* paneles: azul institucional translúcido */
+  --fg: #eaf1f8;
+  --accent: #6db1ff;         /* azul claro legible sobre el azul institucional */
+  --btn: #0d3a72;            /* botones: azul intermedio */
+  --btn-hover: #14508f;
+  --line: #1c4370;           /* separadores dentro de paneles */
+}
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
 #map { position: absolute; inset: 0; background: var(--bg); }
@@ -13,6 +25,7 @@ html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, Seg
 #panel, #replay-panel, #phy-panel {
   width: 280px; padding: 14px 16px; border-radius: 12px;
   background: var(--panel); color: var(--fg);
+  border-top: 3px solid var(--ucu-rojo);   /* filete rojo institucional */
   backdrop-filter: blur(6px); box-shadow: 0 6px 24px #0008;
   overflow-y: auto; overflow-x: hidden;
   transition: max-height .35s ease;
@@ -26,14 +39,23 @@ html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, Seg
 #replay-panel h1::after { content: "🎞"; float: right; opacity: .6; font-weight: 400; }
 #phy-panel h1::after { content: "📶"; float: right; opacity: .6; font-weight: 400; }
 #phy-body b { color: var(--accent); }
-#phy-body .phy-sep { border-top: 1px solid #2c3644; margin: 6px 0; }
+#phy-body .phy-sep { border-top: 1px solid var(--line); margin: 6px 0; }
+/* logo institucional en la cabecera del panel principal */
+.uc-logo {
+  height: 22px; width: 22px; vertical-align: -5px; margin-right: 8px;
+  background: #fff; border-radius: 50%; padding: 2px; box-sizing: content-box;
+}
+.uc-sub {
+  font-size: 10px; letter-spacing: 1.6px; text-transform: uppercase;
+  color: #bcd2e8; opacity: .85; margin: -4px 0 10px 0;
+}
 #fps-val { white-space: nowrap; min-width: 46px; text-align: right; }
 .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 13px; }
 button {
   flex: 1; padding: 7px 10px; border: 0; border-radius: 8px; cursor: pointer;
-  background: #2a3442; color: var(--fg); font-size: 13px;
+  background: var(--btn); color: var(--fg); font-size: 13px;
 }
-button:hover { background: #35435a; }
+button:hover { background: var(--btn-hover); }
 input[type=range] { flex: 1; accent-color: var(--accent); }
 #topbar {
   position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 6;
@@ -41,7 +63,7 @@ input[type=range] { flex: 1; accent-color: var(--accent); }
   background: var(--panel); color: var(--fg); border-radius: 10px;
   box-shadow: 0 6px 24px #0008; backdrop-filter: blur(6px);
 }
-.topbar-sep { width: 1px; height: 22px; background: #3a4658; margin: 0 2px; }
+.topbar-sep { width: 1px; height: 22px; background: var(--line); margin: 0 2px; }
 .topbar-slider { display: flex; align-items: center; gap: 6px; padding: 0 4px; }
 .topbar-slider .slider-ico { font-size: 15px; opacity: .8; }
 .topbar-slider input[type=range] { flex: 0 0 auto; width: 110px; }
@@ -71,6 +93,7 @@ input[type=range] { flex: 1; accent-color: var(--accent); }
   position: absolute; top: 12px; right: 12px; z-index: 5;
   width: 268px; padding: 14px 16px; border-radius: 12px;
   background: var(--panel); color: var(--fg);
+  border-top: 3px solid var(--ucu-rojo);
   backdrop-filter: blur(6px); box-shadow: 0 6px 24px #0008;
   max-height: 82vh; overflow-y: auto; overflow-x: hidden;
   transition: max-height .35s ease;
@@ -81,7 +104,7 @@ input[type=range] { flex: 1; accent-color: var(--accent); }
 .h-block { margin: 10px 0; }
 .h-title { font-size: 12px; margin-bottom: 4px; }
 .h-title b { color: var(--accent); float: right; }
-.h-block canvas { display: block; width: 100%; height: 66px; background: #10151d; border-radius: 6px; }
+.h-block canvas { display: block; width: 100%; height: 66px; background: #001a3a; border-radius: 6px; }
 .h-legend { font-size: 10.5px; opacity: .8; margin-top: 3px; }
 .h-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin: 0 3px 0 8px; vertical-align: -1px; }
 .h-legend i:first-child { margin-left: 0; }
@@ -139,7 +162,7 @@ body.zen #left-col, body.zen #histpanel,
 body.zen #topbar, body.zen #pantilt-wrap { display: none; }
 body.zen #btn-zen { opacity: .5; }
 
-#stats { margin-top: 12px; font-size: 13px; line-height: 1.7; border-top: 1px solid #2c3644; padding-top: 10px; }
+#stats { margin-top: 12px; font-size: 13px; line-height: 1.7; border-top: 1px solid var(--line); padding-top: 10px; }
 #veh-count, #sim-time { color: var(--accent); }
 #conn { font-size: 11px; margin-top: 4px; }
 #conn.online { color: #6ee7a0; }
