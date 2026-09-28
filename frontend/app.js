@@ -1385,6 +1385,19 @@ function connect() {
       applyInspect(msg);
     } else if (msg.type === "end") {
       els.conn.textContent = "simulación finalizada";
+    } else if (msg.type === "status") {
+      // estado global de la corrida (backend con conexión TraCI persistente):
+      // la pestaña puede recargarse o abrirse varias veces sin tocar a SUMO
+      if (msg.status === "running") {
+        els.conn.textContent = msg.paused ? "en vivo (pausado)" : "en vivo";
+        els.conn.className = "online";
+      } else {
+        els.conn.textContent = msg.detail || msg.status;
+        els.conn.className = "offline";
+      }
+      if (!replayMode && typeof msg.paused === "boolean" && msg.paused !== paused) {
+        setPaused(msg.paused);            // play/pausa es global: sincronizar el botón
+      }
     } else if (msg.type === "error") {
       els.conn.textContent = msg.message;
     }

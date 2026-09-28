@@ -62,8 +62,14 @@ class SumoBridge:
             last_exc: Exception | None = None
             for port in range(settings.sumo_port,
                               settings.sumo_port + max(settings.sumo_port_scan, 0) + 1):
+                # numRetries=0: UN intento por puerto, sin el sleep de 1 s ni las
+                # líneas "Retrying..." de traci (el hub ya reintenta cada 2 s).
+                # OJO: nunca "sondear" el puerto con un TCP connect+close: con
+                # --num-clients N SUMO cuenta ese socket como cliente y al
+                # cerrarse aborta la corrida ("peer shutdown") antes de que ns-3
+                # llegue a conectarse.
                 try:
-                    client.init(host=settings.sumo_host, port=port, numRetries=1)
+                    client.init(host=settings.sumo_host, port=port, numRetries=0)
                     if port != settings.sumo_port:
                         print(f"[sumo_bridge] SUMO respondió en {port} "
                               f"(base {settings.sumo_port})", flush=True)

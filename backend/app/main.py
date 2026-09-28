@@ -57,7 +57,17 @@ async def lifespan(app: FastAPI):
     if settings.view_lon is not None and settings.view_lat is not None:
         meta["center"] = [settings.view_lon, settings.view_lat]   # open on the demand area
     _state["meta"] = meta
+    hub = None
+    if settings.sumo_mode == "remote":
+        # conexión TraCI persistente compartida por todos los visores (ver
+        # live_hub.py: SUMO multi-cliente no readmite clientes tras arrancar)
+        from .live_hub import LiveHub
+        hub = LiveHub(_state, _live_rep_nowait)
+        hub.start()
+        _state["hub"] = hub
     yield
+    if hub is not None:
+        await hub.stop()
     _state.clear()
 
 
@@ -73,7 +83,11 @@ app.add_middleware(
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "mode": settings.sumo_mode}
+    out = {"status": "ok", "mode": settings.sumo_mode}
+    hub = _state.get("hub")
+    if hub is not None:
+        out["sumo"] = hub.status_msg()          # waiting | running | ended
+    return out
 
 
 @app.get("/api/meta")
@@ -308,6 +322,11 @@ async def ws_live(ws: WebSocket):
     if ws.query_params.get("replay"):
         await _ws_replay(ws)
         return
+    hub = _state.get("hub")
+    if hub is not None:                # modo remote: suscribirse al hub
+        await hub.serve(ws)
+        return
+    # modo managed: cada WebSocket lanza y controla su propio SUMO
     netgeo = _state["netgeo"]
     bridge = SumoBridge()
 

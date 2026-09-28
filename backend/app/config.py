@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     sumo_order: int = 0        # >0 => TraCI multi-cliente: llamar setOrder(N) al conectar
     sumo_port_scan: int = 0    # nº de puertos extra a probar tras sumo_port (el TraCI de
                                # ns-3/VaN3Twin corre el puerto +1 si el anterior está en TIME_WAIT)
+    # Modo remote: el backend mantiene UNA conexión TraCI persistente para toda
+    # la corrida (app.live_hub) y los navegadores solo se suscriben a ella:
+    # recargar la página ya no cierra el cliente 2 de SUMO (ver live_hub.py).
+    sumo_retry_s: float = 2.0          # reintento mientras ns-3 no ha lanzado SUMO
+    hold_without_viewers: bool = True  # sin visores, no avanzar (ns-3 espera)
 
     # --- Replay offline (mensajes V2X desde .pcap de VaN3Twin) ---------------
     # El WS con ?replay=1 reproduce una corrida grabada: movilidad desde los
