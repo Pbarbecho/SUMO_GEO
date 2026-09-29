@@ -23,6 +23,7 @@ const els = {
   busyMin: document.getElementById("busy-min"),
   busyVal: document.getElementById("busy-val"),
   orbit: document.getElementById("orbit"),
+  mouseCam: document.getElementById("mouse-cam"),
   viewTop: document.getElementById("view-top"),
   zoomIn: document.getElementById("zoom-in"),
   zoomOut: document.getElementById("zoom-out"),
@@ -128,6 +129,14 @@ let vehicles = [];        // flota actual (objetos del registro, mutados in-plac
 // animación. Se activa con ?lite=1 o con la casilla del panel (se recuerda).
 let liteMode = /[?&]lite=1/.test(location.search);
 try { if (localStorage.getItem("sumo-geo-lite") === "1") liteMode = true; } catch (_) {}
+if (liteMode) {
+  // MapLibre y deck.gl (luma.gl) comparten el canvas y CADA UNO decide su
+  // tamaño de lienzo a partir de devicePixelRatio; si solo se baja el del mapa
+  // (opción pixelRatio), luma lo vuelve a subir a 2x en pantallas retina y el
+  // mapa queda encogido en una esquina. Fijar la propiedad en la página hace
+  // que ambos rendericen a 1 px por px CSS.
+  try { Object.defineProperty(window, "devicePixelRatio", { get: () => 1, configurable: true }); } catch (_) {}
+}
 
 // --- registro de flota (protocolo v2) ---------------------------------------
 // Cada vehículo es UN objeto que vive mientras el vehículo está en la
@@ -734,6 +743,7 @@ async function boot() {
   // guard, el propio jumpTo de la cámara cockpit cancelaba el seguimiento en el
   // primer frame (por eso "no funcionaba").
   map.on("dragstart", () => { stopOrbit(); stopFollow(); });
+  setupMouseCamera();
   map.on("rotatestart", (e) => { if (e && e.originalEvent) { stopOrbit(); stopFollow(); } });
   map.on("rotate", syncPad);            // keep the Pan-Tilt pad in sync with gestures/orbit
   map.on("pitch", syncPad);
@@ -767,18 +777,25 @@ async function boot() {
     }
     map.addSource("roads", { type: "geojson", data: networkGeo, promoteId: "id",
                              tolerance: 0.35, buffer: 32 });
+    // Las capas 2D de MapLibre se pintan en orden, sin prueba de profundidad
+    // real: para que los edificios 3D del MAPA BASE (capa fill-extrusion del
+    // estilo, p. ej. "building-3d") tapen las calles, estas van ANTES de la
+    // primera extrusión del estilo; si no hay, antes de las etiquetas. Los
+    // edificios SUMO (buildings-3d) y los vehículos (deck) se añaden después.
+    const firstExtrusion = map.getStyle().layers.find((l) => l.type === "fill-extrusion");
+    const roadsBeforeId = (firstExtrusion && firstExtrusion.id) || labelLayerId;
     map.addLayer({ id: "road-casing", type: "line", source: "roads",
       layout: { "line-cap": "round", "line-join": "round" },
       paint: { "line-color": "#404656", "line-width": metersToPx(["+", ["get", "w"], 0.6]) } },
-      labelLayerId);
+      roadsBeforeId);
     map.addLayer({ id: "road-surface", type: "line", source: "roads",
       layout: { "line-cap": "round", "line-join": "round" },
       paint: { "line-color": roadColorExpr(), "line-width": metersToPx(["get", "w"]) } },
-      labelLayerId);
+      roadsBeforeId);
     map.addLayer({ id: "lane-lines", type: "line", source: "roads",
       filter: [">=", ["get", "lanes"], 2],
       paint: { "line-color": "#f2f2ec", "line-width": metersToPx(0.3, 0.6, 2) } },
-      labelLayerId);
+      roadsBeforeId);
     // --- extruded building polygons (native MapLibre fill-extrusion) --------
     const buildings = await fetchJSON("/api/buildings");
     map.addSource("buildings", { type: "geojson", data: buildings });
@@ -805,7 +822,12 @@ async function boot() {
     }
     tlDefs = await fetchJSON("/api/trafficlights");
     splitTrafficLights();
-    overlay = new deck.MapboxOverlay({ interleaved: true, layers: buildLayers() });
+    // deck.gl comparte el canvas de MapLibre: su escala de píxeles debe ser la
+    // MISMA que la del mapa. En modo ligero el mapa va a 1 px por px CSS; si
+    // deck siguiera con devicePixelRatio (2 en retina) redimensionaría el
+    // lienzo al doble y el mapa quedaría encogido en una esquina (descuadre).
+    overlay = new deck.MapboxOverlay({ interleaved: true, layers: buildLayers(),
+                                       useDevicePixels: liteMode ? 1 : true });
     map.addControl(overlay);
 
     applyLightPreset(currentPreset);   // default light preset (día)
@@ -1313,8 +1335,16 @@ let pendingInspect = null;   // vehicle id whose extended stats we're waiting fo
 function setupInspector() {
   const popup = document.getElementById("popup");
   const container = map.getCanvasContainer();
+  // botón derecho: si hubo arrastre (giro/inclinación nativos de MapLibre),
+  // el contextmenu que suelta el navegador al levantar NO debe abrir el inspector
+  let rightDown = null;
+  container.addEventListener("mousedown", (e) => { if (e.button === 2) rightDown = [e.clientX, e.clientY]; });
   container.addEventListener("contextmenu", (e) => {
     e.preventDefault();
+    if (rightDown && Math.hypot(e.clientX - rightDown[0], e.clientY - rightDown[1]) > 4) {
+      rightDown = null; return;
+    }
+    rightDown = null;
     if (!overlay) return;
     const rect = map.getCanvas().getBoundingClientRect();
     const info = overlay.pickObject({
@@ -1798,6 +1828,44 @@ els.pad.addEventListener("pointerdown", (ev) => {
 els.pad.addEventListener("pointermove", (ev) => { if (padDrag) padPoint(ev); });
 els.pad.addEventListener("pointerup", () => { padDrag = false; els.pad.classList.remove("grabbing"); });
 els.pad.addEventListener("dblclick", () => { if (map) { stopOrbit(); map.easeTo({ bearing: 0, pitch: 55, duration: 400 }); } });
+
+// --- cámara con el ratón (sin el pad) ---------------------------------------
+// Nativo de MapLibre: botón derecho + arrastrar (o Ctrl/⌘ + arrastrar) gira e
+// inclina. Además: Alt/Option + arrastrar hace lo mismo con el botón
+// izquierdo, y el botón 🖱 del topbar ("modo cámara") convierte el arrastre
+// normal en giro (horizontal) + inclinación (vertical); se desactiva el
+// desplazamiento mientras está activo (para desplazar, desactívalo o usa
+// Shift + arrastrar). Sensibilidad: 0,35°/px de giro, 0,3°/px de inclinación.
+let mouseCam = false;
+function setMouseCam(on) {
+  mouseCam = on;
+  if (els.mouseCam) els.mouseCam.classList.toggle("active", on);
+  if (map) {
+    if (on) map.dragPan.disable(); else map.dragPan.enable();
+    map.getCanvas().style.cursor = on ? "all-scroll" : "";
+  }
+}
+if (els.mouseCam) els.mouseCam.onclick = () => setMouseCam(!mouseCam);
+function setupMouseCamera() {
+  const container = map.getCanvasContainer();
+  let drag = null;
+  // captura: antes que los handlers de MapLibre, para que no inicie un pan
+  container.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    if (!((mouseCam && !e.shiftKey) || e.altKey)) return;
+    drag = { x: e.clientX, y: e.clientY, b: map.getBearing(), p: map.getPitch() };
+    stopOrbit(); stopFollow();
+    e.preventDefault(); e.stopPropagation();
+  }, true);
+  window.addEventListener("mousemove", (e) => {
+    if (!drag) return;
+    const pitch = Math.max(0, Math.min(map.getMaxPitch(), drag.p - (e.clientY - drag.y) * 0.3));
+    map.jumpTo({ bearing: drag.b + (e.clientX - drag.x) * 0.35, pitch });
+    syncPad();
+  });
+  window.addEventListener("mouseup", () => { drag = null; });
+  // teclas: Shift + flechas giran e inclinan (handler de teclado de MapLibre)
+}
 
 let orbitRAF = null;
 function stopOrbit() {

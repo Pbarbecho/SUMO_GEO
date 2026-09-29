@@ -97,8 +97,16 @@ semáforos** (mean of currently-waiting vehicles), and the live **per-type** cou
 
 ### Top bar
 
-`+ / −` zoom · `◐` auto-orbit · `2D/3D` top-down ⇄ perspective ·
+`+ / −` zoom · `◐` auto-orbit · `🖱` **mouse camera** (drag rotates and tilts;
+Shift+drag still pans) · `2D/3D` top-down ⇄ perspective ·
 light presets: **amanecer · día · atardecer · noche** (sky, sun, palette, tint).
+
+### Mouse and keyboard camera
+
+Without the pad: **right-button drag** (or Ctrl/⌘ + drag) rotates and tilts,
+**Alt/Option + drag** does the same with the left button, the wheel zooms,
+**Shift + arrows** rotate/tilt and arrows pan. Enable `🖱` to rotate/tilt with a
+plain drag.
 
 ### Pan-Tilt pad (bottom-right)
 
