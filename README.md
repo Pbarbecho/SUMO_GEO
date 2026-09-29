@@ -48,8 +48,8 @@ install, no game engine — on the web-native **MapLibre GL JS + deck.gl** stack
   mean travel time of arrivals, waiting time at signals, plus a per-type breakdown.
 - **Busy-streets layer** — floating teardrop pins with the live vehicle count on
   every street at/above a user-selected threshold.
-- **Camera** — unified **Pan-Tilt pad** (bottom-right), zoom, auto-orbit, 2D/3D
-  toggle. Panels auto-hide to their title bar.
+- **Camera** — rotate/tilt with the mouse (right-drag, Ctrl/Alt+drag or the 🖱
+  mode), zoom, auto-orbit, 2D/3D toggle. Panels auto-hide to their title bar.
 - **Scalability** — TraCI **subscriptions** (whole fleet in one round trip),
   LOS restricted to **active edges** (O(vehicles), not O(34k edges)) — measured
   **135× faster** frames on the metropolitan net — plus cached static layers and
@@ -103,17 +103,10 @@ light presets: **amanecer · día · atardecer · noche** (sky, sun, palette, ti
 
 ### Mouse and keyboard camera
 
-Without the pad: **right-button drag** (or Ctrl/⌘ + drag) rotates and tilts,
-**Alt/Option + drag** does the same with the left button, the wheel zooms,
-**Shift + arrows** rotate/tilt and arrows pan. Enable `🖱` to rotate/tilt with a
-plain drag.
-
-### Pan-Tilt pad (bottom-right)
-
-Drag inside the ring: **horizontal = pan** (bearing, centre = north),
-**vertical = tilt** (top = horizon 85°, bottom = top-down). Double-click resets
-to north + 55°. The readout shows compass + angles; it follows mouse gestures
-and the orbit.
+Camera mode (`🖱`) is **on by default**: a plain drag rotates and tilts,
+**Shift + drag** pans. With it off, a drag pans and **right-button drag**
+(or Ctrl/⌘ or Alt/Option + drag) rotates and tilts. The wheel zooms,
+**Shift + arrows** rotate/tilt and arrows pan. The choice is remembered.
 
 ### Right-click inspector
 

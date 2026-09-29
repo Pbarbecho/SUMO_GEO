@@ -11,9 +11,6 @@ const els = {
   reset: document.getElementById("btn-reset"),
   fps: document.getElementById("fps"),
   fpsVal: document.getElementById("fps-val"),
-  pad: document.getElementById("pantilt"),
-  padKnob: document.getElementById("pad-knob"),
-  ptRead: document.getElementById("pt-read"),
   buildings: document.getElementById("toggle-buildings"),
   congestion: document.getElementById("toggle-congestion"),
   tl: document.getElementById("toggle-tl"),
@@ -744,10 +741,10 @@ async function boot() {
   // primer frame (por eso "no funcionaba").
   map.on("dragstart", () => { stopOrbit(); stopFollow(); });
   setupMouseCamera();
+  initMouseCam();
   map.on("rotatestart", (e) => { if (e && e.originalEvent) { stopOrbit(); stopFollow(); } });
-  map.on("rotate", syncPad);            // keep the Pan-Tilt pad in sync with gestures/orbit
-  map.on("pitch", syncPad);
-  map.on("moveend", syncPad);
+  map.on("pitch", syncCamera);          // keep the 2D/3D button in sync with gestures/orbit
+  map.on("moveend", syncCamera);
 
   map.on("load", async () => {
     // deck.gl + Mapbox "single context" pattern (vis.gl): draw our data BENEATH
@@ -831,7 +828,7 @@ async function boot() {
     map.addControl(overlay);
 
     applyLightPreset(currentPreset);   // default light preset (día)
-    syncPad();                         // place the Pan-Tilt knob at the initial camera
+    syncCamera();                      // 2D/3D button label for the initial camera
     setupInspector();                  // right-click SUMO stats on vehicles/roads/signals
     connect();
   });
@@ -1791,45 +1788,13 @@ els.busyMin.oninput = () => { busyMin = Number(els.busyMin.value); els.busyVal.t
 els.detect.onchange = () => { showDetection = els.detect.checked; refreshLayers(); };
 els.sensorMode.onchange = () => applySensorMode(els.sensorMode.value);
 
-// --- unified Pan-Tilt pad: X = bearing (pan), Y = pitch (tilt) --------------
-const PITCH_MAX = 85;
-const COMPASS = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"];
-function placeKnob(nx, ny, bearing, pitch) {
-  if (els.padKnob) { els.padKnob.style.left = `${nx * 100}%`; els.padKnob.style.top = `${ny * 100}%`; }
-  if (els.ptRead) {
-    const b = Math.round(bearing);
-    const dir = COMPASS[Math.round((((b % 360) + 360) % 360) / 45) % 8];
-    els.ptRead.textContent = `${dir} ${b}° · tilt ${Math.round(pitch)}°`;
-  }
-}
-function syncPad() {                     // reflect the camera on the pad (gestures / orbit)
+// el botón 2D/3D refleja la inclinación actual (gestos, órbita, teclado)
+function syncCamera() {
   if (!map) return;
-  const b = map.getBearing(), p = map.getPitch();
-  placeKnob((b / 180 + 1) / 2, 1 - p / PITCH_MAX, b, p);
-  setViewLabel(p <= 5);                  // keep the 2D/3D button label in sync
+  setViewLabel(map.getPitch() <= 5);
 }
-function padPoint(ev) {                   // pointer -> bearing (X) + pitch (Y)
-  const r = els.pad.getBoundingClientRect();
-  const nx = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width));
-  const ny = Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height));
-  if (map) {
-    stopOrbit(); stopFollow();
-    map.setBearing((nx * 2 - 1) * 180);     // left -180 .. right +180 (centre = north)
-    map.setPitch((1 - ny) * PITCH_MAX);     // top = horizon (85°), bottom = top-down (0°)
-    syncPad();                              // knob follows the (clamped) camera
-  }
-}
-let padDrag = false;
-els.pad.addEventListener("pointerdown", (ev) => {
-  padDrag = true; els.pad.classList.add("grabbing");
-  try { els.pad.setPointerCapture(ev.pointerId); } catch (e) {}
-  padPoint(ev);
-});
-els.pad.addEventListener("pointermove", (ev) => { if (padDrag) padPoint(ev); });
-els.pad.addEventListener("pointerup", () => { padDrag = false; els.pad.classList.remove("grabbing"); });
-els.pad.addEventListener("dblclick", () => { if (map) { stopOrbit(); map.easeTo({ bearing: 0, pitch: 55, duration: 400 }); } });
 
-// --- cámara con el ratón (sin el pad) ---------------------------------------
+// --- cámara con el ratón ----------------------------------------------------
 // Nativo de MapLibre: botón derecho + arrastrar (o Ctrl/⌘ + arrastrar) gira e
 // inclina. Además: Alt/Option + arrastrar hace lo mismo con el botón
 // izquierdo, y el botón 🖱 del topbar ("modo cámara") convierte el arrastre
@@ -1845,7 +1810,17 @@ function setMouseCam(on) {
     map.getCanvas().style.cursor = on ? "all-scroll" : "";
   }
 }
-if (els.mouseCam) els.mouseCam.onclick = () => setMouseCam(!mouseCam);
+if (els.mouseCam) els.mouseCam.onclick = () => {
+  setMouseCam(!mouseCam);
+  try { localStorage.setItem("sumo-geo-mousecam", mouseCam ? "1" : "0"); } catch (_) {}
+};
+// activo por defecto (arrastrar = girar e inclinar; Shift + arrastrar = desplazar);
+// la preferencia se recuerda entre recargas
+function initMouseCam() {
+  let on = true;
+  try { on = localStorage.getItem("sumo-geo-mousecam") !== "0"; } catch (_) {}
+  setMouseCam(on);
+}
 function setupMouseCamera() {
   const container = map.getCanvasContainer();
   let drag = null;
@@ -1861,7 +1836,7 @@ function setupMouseCamera() {
     if (!drag) return;
     const pitch = Math.max(0, Math.min(map.getMaxPitch(), drag.p - (e.clientY - drag.y) * 0.3));
     map.jumpTo({ bearing: drag.b + (e.clientX - drag.x) * 0.35, pitch });
-    syncPad();
+    syncCamera();
   });
   window.addEventListener("mouseup", () => { drag = null; });
   // teclas: Shift + flechas giran e inclinan (handler de teclado de MapLibre)
