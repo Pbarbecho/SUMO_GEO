@@ -87,6 +87,10 @@ class Settings(BaseSettings):
     # --- Streaming -----------------------------------------------------------
     max_fps: float = 10.0                       # WebSocket frame-rate cap
     cors_origins: str = "*"                     # comma-separated list or "*"
+    # Estimación LOS por arista cada N frames (a 10 fps, 7 = ~1.4 Hz, que es
+    # la cadencia con la que el visor recolorea la red de todas formas). Las
+    # filas de aristas son la parte más pesada del frame tras los vehículos.
+    los_every: int = 7
 
 
 settings = Settings()

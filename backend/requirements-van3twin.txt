@@ -9,3 +9,4 @@ traci==1.12.0
 sumolib==1.12.0
 pyproj>=3.6
 asn1tools>=0.166   # replay offline: decodificar CAM/CPM/DENM (ASN.1 UPER) de los .pcap
+orjson>=3.9        # serialización de frames (10x json); ver app/frames.py

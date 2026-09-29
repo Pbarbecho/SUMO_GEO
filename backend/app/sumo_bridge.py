@@ -7,10 +7,30 @@ Modes (see :mod:`app.config`):
 
 libsumo (in-process, faster, no socket) is used automatically when
 ``use_libsumo`` is set and the module is importable; it exposes the same API.
+
+Coste por frame (lo que importa para escalar a cientos/miles de vehículos)
+-------------------------------------------------------------------------
+Cada llamada TraCI es un round-trip por socket (~0.1-0.5 ms en Docker). El
+puente está pensado para que un frame cueste un número FIJO de round-trips,
+independiente del tamaño de la flota, de la red y del nº de semáforos:
+
+1. ``simulationStep``            avanza SUMO y trae, en la MISMA respuesta,
+                                 todas las suscripciones:
+   * flota completa (posición/rumbo/velocidad/tipo/arista/CO2/espera) vía
+     una suscripción de CONTEXTO sobre un cruce con radio "infinito" -> los
+     vehículos nuevos entran solos, sin ``subscribe`` por vehículo;
+   * variables de simulación (tiempo, salidas, llegadas, mínimo esperado);
+   * estado de TODOS los semáforos (una suscripción por TLS al arrancar).
+2. nada más. La estimación LOS por arista se calcula a partir de la flota
+   (ver :func:`app.traffic.edge_estimation_from_fleet`): 0 llamadas TraCI.
+
+Antes: ~3 llamadas por arista activa + 1 por semáforo + 5 de bookkeeping por
+frame (con 600 vehículos, ~700 round-trips y ~55 ms por frame).
 """
 from __future__ import annotations
 
 import itertools
+import re
 
 import traci.constants as tc
 
@@ -19,10 +39,19 @@ from .config import settings
 _CONN_COUNTER = itertools.count()   # unique traci connection labels
 
 # Per-vehicle variables streamed via TraCI subscriptions: the whole fleet arrives
-# in ONE round trip per step instead of ~6 socket calls per vehicle. This is what
-# makes thousands of concurrent vehicles feasible.
+# in ONE round trip per step instead of ~6 socket calls per vehicle.
 _SUB_VARS = (tc.VAR_POSITION, tc.VAR_ANGLE, tc.VAR_SPEED, tc.VAR_TYPE,
              tc.VAR_ROAD_ID, tc.VAR_CO2EMISSION, tc.VAR_WAITING_TIME)
+_SIM_VARS = (tc.VAR_TIME, tc.VAR_DEPARTED_VEHICLES_IDS,
+             tc.VAR_ARRIVED_VEHICLES_IDS, tc.VAR_MIN_EXPECTED_VEHICLES)
+_CTX_RANGE = 1.0e8          # m: "toda la red" (SUMO filtra por distancia al cruce)
+_STATION_RE = re.compile(r"(\d+)")
+
+
+def station_of(vid: str) -> int | None:
+    """stationID ETSI = nº del id SUMO (veh12 -> 12), como en el replay."""
+    m = _STATION_RE.search(vid)
+    return int(m.group(1)) if m else None
 
 
 class SumoBridge:
@@ -40,6 +69,16 @@ class SumoBridge:
         self.last_co2 = 0.0                       # fleet total, mg/s (from subscriptions)
         self.last_wait_mean = 0.0                 # mean waiting of stopped vehicles (s)
         self.last_wait_n = 0                      # how many vehicles are waiting
+        # subscription bookkeeping
+        self._ctx_junction: str | None = None     # junction that anchors the context sub
+        self._sim_sub = False                     # simulation vars subscribed?
+        self._tls_sub = False                     # traffic lights subscribed?
+        self._t = 0.0                             # último tiempo conocido (s)
+        self._min_expected = 1
+        self.departed: list[str] = []             # ids salidos en el último step
+        self.arrived: list[str] = []              # ids llegados en el último step
+        self.edge_agg: dict = {}                  # edge -> [n, speed_sum, len_sum]
+        self._tls_last: dict = {}                 # tid -> estado; para detectar cambios
 
     def _import_client(self):
         if settings.use_libsumo:
@@ -105,28 +144,81 @@ class SumoBridge:
                 client.start(args, label=self.label)
                 self.conn = client.getConnection(self.label)
         self.running = True
-        try:                                    # vehicles already in the run (mid-day start)
-            for vid in self.conn.vehicle.getIDList():
-                self.conn.vehicle.subscribe(vid, _SUB_VARS)
-        except Exception:
-            pass
+        self._t = self.conn.simulation.getTime()
+        self._subscribe_all()
 
+    # ------------------------------------------------------------ suscripciones
+    def _subscribe_all(self) -> None:
+        conn = self.conn
+        # 1) flota completa: contexto sobre un cruce con radio "infinito"
+        try:
+            jids = conn.junction.getIDList()
+            if jids:
+                jid = jids[0]
+                conn.junction.subscribeContext(jid, tc.CMD_GET_VEHICLE_VARIABLE,
+                                               _CTX_RANGE, _SUB_VARS)
+                self._ctx_junction = jid
+        except Exception as exc:  # noqa: BLE001 - fallback: una suscripción por vehículo
+            print(f"[sumo_bridge] sin suscripción de contexto ({exc}); "
+                  f"usando suscripción por vehículo", flush=True)
+            self._ctx_junction = None
+        if self._ctx_junction is None:
+            try:                                # vehicles already in the run
+                for vid in conn.vehicle.getIDList():
+                    conn.vehicle.subscribe(vid, _SUB_VARS)
+            except Exception:
+                pass
+        # 2) variables de simulación (tiempo, salidas, llegadas, mín. esperado)
+        try:
+            conn.simulation.subscribe(_SIM_VARS)
+            self._sim_sub = True
+        except Exception:
+            self._sim_sub = False
+        # 3) semáforos: estado de todos en cada step
+        try:
+            for tid in conn.trafficlight.getIDList():
+                conn.trafficlight.subscribe(tid, (tc.TL_RED_YELLOW_GREEN_STATE,))
+            self._tls_sub = True
+        except Exception:
+            self._tls_sub = False
+
+    # ------------------------------------------------------------------- paso
     def step(self) -> float:
+        conn = self.conn
         if settings.sumo_mode == "remote" and settings.sumo_order:
             # Multi-cliente con ns-3 (VaN3Twin): pedir un objetivo ABSOLUTO grueso
             # (t_actual + step_length). ns-3 avanza con sus pasos finos y marca el
             # ritmo; si pidiéramos "un paso" por frame, ns-3 quedaría esclavo del
             # visor (validado empíricamente — ver GUIA_INTEGRACION_SUMO_GEO.md).
-            self.conn.simulationStep(
-                self.conn.simulation.getTime() + settings.step_length)
+            conn.simulationStep(self._t + settings.step_length)
         else:
-            self.conn.simulationStep()
-        now = self.conn.simulation.getTime()
+            conn.simulationStep()
+        sim = None
+        if self._sim_sub:
+            try:
+                sim = conn.simulation.getSubscriptionResults() or None
+            except Exception:
+                sim = None
+        if sim and tc.VAR_TIME in sim:
+            now = float(sim[tc.VAR_TIME])
+            self.departed = list(sim.get(tc.VAR_DEPARTED_VEHICLES_IDS, ()))
+            self.arrived = list(sim.get(tc.VAR_ARRIVED_VEHICLES_IDS, ()))
+            self._min_expected = int(sim.get(tc.VAR_MIN_EXPECTED_VEHICLES, 1))
+        else:                                   # sin suscripción: 4 round-trips
+            now = conn.simulation.getTime()
+            try:
+                self.departed = list(conn.simulation.getDepartedIDList())
+                self.arrived = list(conn.simulation.getArrivedIDList())
+                self._min_expected = conn.simulation.getMinExpectedNumber()
+            except Exception:
+                self.departed, self.arrived = [], []
+        self._t = now
         try:                                    # keep the subscription set complete
-            for vid in self.conn.simulation.getDepartedIDList():
-                self.conn.vehicle.subscribe(vid, _SUB_VARS)
+            for vid in self.departed:
+                if self._ctx_junction is None:
+                    conn.vehicle.subscribe(vid, _SUB_VARS)
                 self._depart_t[vid] = now       # for travel-time stats
-            for vid in self.conn.simulation.getArrivedIDList():
+            for vid in self.arrived:
                 t0 = self._depart_t.pop(vid, None)
                 if t0 is not None:
                     self._tt.append(now - t0)
@@ -148,39 +240,70 @@ class SumoBridge:
             self._dims[type_id] = d
         return d
 
-    def vehicles(self, netgeo) -> list[dict]:
+    def _fleet_results(self) -> dict:
         conn = self.conn
         res = {}
         try:
-            res = conn.vehicle.getAllSubscriptionResults()   # whole fleet, 1 round trip
+            if self._ctx_junction is not None:
+                res = conn.junction.getContextSubscriptionResults(self._ctx_junction) or {}
+            else:
+                res = conn.vehicle.getAllSubscriptionResults() or {}
         except Exception:
             res = {}
-        if not res and conn.vehicle.getIDCount() > 0:
+        return res
+
+    def vehicles(self, netgeo) -> list[dict]:
+        """Flota completa como lista de dicts (una entrada por vehículo).
+
+        Además deja en ``self.edge_agg`` la agregación por arista
+        (nº vehículos, suma de velocidades, suma de longitudes) que usa la
+        estimación LOS sin más llamadas TraCI.
+        """
+        res = self._fleet_results()
+        if not res and self.conn.vehicle.getIDCount() > 0:
             return self._vehicles_polled(netgeo)             # safety fallback
+        ids = list(res.keys())
+        xs, ys = [], []
+        for vid in ids:
+            x, y = res[vid][tc.VAR_POSITION]
+            xs.append(x)
+            ys.append(y)
+        lons, lats = netgeo.xy_to_lonlat_many(xs, ys)        # 1 llamada pyproj
         out = []
         co2_total = 0.0
         wait_sum, wait_n = 0.0, 0
-        for vid, r in res.items():
-            x, y = r[tc.VAR_POSITION]
-            lon, lat = netgeo.xy_to_lonlat(x, y)
+        agg: dict = {}
+        for i, vid in enumerate(ids):
+            r = res[vid]
             vtype = r[tc.VAR_TYPE]
             length, width = self._type_dims(vtype)
+            speed = r[tc.VAR_SPEED]
+            edge = r.get(tc.VAR_ROAD_ID, "")
             co2_total += r.get(tc.VAR_CO2EMISSION, 0.0)
             w = r.get(tc.VAR_WAITING_TIME, 0.0)
             if w > 0:                            # stopped (mostly at signals/queues)
                 wait_sum += w
                 wait_n += 1
+            if edge and not edge.startswith(":"):
+                a = agg.get(edge)
+                if a is None:
+                    agg[edge] = [1, speed, length]
+                else:
+                    a[0] += 1
+                    a[1] += speed
+                    a[2] += length
             out.append({
                 "id": vid,
-                "lon": lon,
-                "lat": lat,
+                "lon": round(lons[i], 6),        # 1e-6 deg ≈ 11 cm: sobra para el 3D
+                "lat": round(lats[i], 6),
                 "angle": round(r[tc.VAR_ANGLE], 1),
-                "speed": round(r[tc.VAR_SPEED], 2),
+                "speed": round(speed, 2),
                 "type": vtype,
                 "len": length,
                 "wid": width,
-                "edge": r[tc.VAR_ROAD_ID],
+                "edge": edge,
             })
+        self.edge_agg = agg
         self.last_co2 = co2_total
         self.last_wait_mean = (wait_sum / wait_n) if wait_n else 0.0
         self.last_wait_n = wait_n
@@ -201,18 +324,27 @@ class SumoBridge:
         """Old per-vehicle polling path (used only if subscriptions are empty)."""
         conn = self.conn
         out = []
+        agg: dict = {}
         for vid in conn.vehicle.getIDList():
             x, y = conn.vehicle.getPosition(vid)
             lon, lat = netgeo.xy_to_lonlat(x, y)
             vtype = conn.vehicle.getTypeID(vid)
             length, width = self._type_dims(vtype)
+            speed = conn.vehicle.getSpeed(vid)
+            edge = conn.vehicle.getRoadID(vid)
+            if edge and not edge.startswith(":"):
+                a = agg.setdefault(edge, [0, 0.0, 0.0])
+                a[0] += 1
+                a[1] += speed
+                a[2] += length
             out.append({
-                "id": vid, "lon": lon, "lat": lat,
+                "id": vid, "lon": round(lon, 6), "lat": round(lat, 6),
                 "angle": round(conn.vehicle.getAngle(vid), 1),
-                "speed": round(conn.vehicle.getSpeed(vid), 2),
+                "speed": round(speed, 2),
                 "type": vtype, "len": length, "wid": width,
-                "edge": conn.vehicle.getRoadID(vid),
+                "edge": edge,
             })
+        self.edge_agg = agg
         return out
 
     def vehicle_details(self, vid: str) -> dict:
@@ -229,6 +361,7 @@ class SumoBridge:
             "timeloss": lambda: v.getTimeLoss(vid),            # s lost vs. free flow
             "distance": lambda: v.getDistance(vid),            # m driven since depart
             "lane": lambda: v.getLaneID(vid),
+            "edge": lambda: v.getRoadID(vid),
             "route_index": lambda: v.getRouteIndex(vid),
             "route_edges": lambda: len(v.getRoute(vid)),
         }
@@ -241,13 +374,42 @@ class SumoBridge:
         return out
 
     def trafficlights(self) -> dict:
-        """Current signal-state string per traffic light (SUMO r/y/g/G/u/o codes)."""
+        """Current signal-state string per traffic light (SUMO r/y/g/G/u/o codes).
+        Con suscripción: 0 round-trips (viene con el simulationStep)."""
         conn = self.conn
+        if self._tls_sub:
+            try:
+                res = conn.trafficlight.getAllSubscriptionResults() or {}
+                out = {}
+                for tid, r in res.items():
+                    st = r.get(tc.TL_RED_YELLOW_GREEN_STATE)
+                    if st is not None:
+                        out[tid] = st
+                if out or not res:
+                    return out
+            except Exception:
+                pass
         return {tid: conn.trafficlight.getRedYellowGreenState(tid)
                 for tid in conn.trafficlight.getIDList()}
 
+    def trafficlights_if_changed(self) -> dict | None:
+        """Estado de semáforos solo si cambió respecto al último frame (los
+        estados cambian cada varios segundos: no tiene sentido mandarlos y
+        recolorearlos 10 veces por segundo)."""
+        cur = self.trafficlights()
+        if cur == self._tls_last:
+            return None
+        self._tls_last = cur
+        return cur
+
+    @property
+    def tls_state(self) -> dict:
+        return self._tls_last
+
     def min_expected_number(self) -> int:
         """0 when no vehicles remain and none are scheduled -> simulation done."""
+        if self._sim_sub:
+            return self._min_expected
         return self.conn.simulation.getMinExpectedNumber()
 
     def close(self) -> None:

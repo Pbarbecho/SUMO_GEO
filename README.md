@@ -87,6 +87,7 @@ built from OSM (`sumo/cuenca.*`, with 3D buildings). The metropolitan network
 | Semáforos | Toggle the traffic-light layer |
 | PoI | Show/hide basemap points of interest (shops, bus stops…) — hidden by default |
 | Calles concurridas + ≥ N veh | Floating pins on streets with ≥ N vehicles (live count) |
+| **Modo ligero** | Low-resource rendering (1× pixel ratio, no antialias, buildings off, 20 fps animation); remembered, reloads the page. Also `?lite=1` |
 
 ### Right panel — Históricos (auto-hides)
 
@@ -222,7 +223,7 @@ random trips + synthetic building footprints → `sumo/grid.net.xml`,
 |---|---|
 | `GET /api/health` · `/api/meta` | Liveness · map centre/bounds/config |
 | `GET /api/network` · `/api/buildings` · `/api/trafficlights` | Static geometry (GeoJSON, cached) |
-| `WS /ws/live?level=low\|mid\|high` | Frames: `vehicles`, `edges` (LOS), `tls`, `stats` |
+| `WS /ws/live?level=low\|mid\|high` | Frames (protocol v2): `v` flat rows `[id, lon, lat, angle, speed, …]`, `vnew` `{id: [type, len, wid, station]}` (first appearance / `snapshot`), `vgone`, `edges` rows `[id, n, occ, speed, density, los]` every `APP_LOS_EVERY` frames, `tls` on change, `stats` |
 
 WS client → server: `{"cmd":"pause"|"play"}`, `{"cmd":"speed","fps":N}`,
 `{"cmd":"inspect","id":vehId}` → reply `{"type":"inspect", co2, fuel, noise,
@@ -240,6 +241,38 @@ Measured on the metropolitan net (34k edges, level *high*):
 | Full frame (step + vehicles + LOS + signals + JSON) | **~40 ms → up to 25 fps** |
 | Frontend: static layers cached, LOS recolour throttled (~1.4×/s), vehicle **LOD** | smooth with thousands of vehicles |
 
+**2026-09 (hundreds/thousands of vehicles, large maps)** — measured with
+`scripts/bench_backend.py` against a real SUMO (Cuenca centre, dense random
+demand), see `docs/RENDIMIENTO_2026-09.md` for details:
+
+| Fleet | Backend frame before → after | WS bytes/frame before → after |
+|---|---|---|
+| 590 vehicles | **53.6 ms → 16.8 ms** (3.2×; 14 ms is SUMO's own step) | **108 KB → 23 KB** (4.6×) |
+| 1 540 vehicles | **86.6 ms → 41.9 ms** (2.1×; 37 ms is SUMO's step) | **254 KB → 60 KB** (4.2×) |
+
+- **Backend**: a frame now costs a *fixed* number of TraCI round trips
+  (`simulationStep` brings the whole fleet through a **context subscription**,
+  the simulation variables and **all traffic-light states**); LOS is computed
+  from the fleet aggregation (0 calls per edge); vectorised projection; frames
+  serialised once with **orjson** and pushed to every viewer through a
+  per-viewer queue that **drops stale frames** (a slow tab never stalls the
+  ns-3 lockstep). Static GeoJSON is pre-gzipped with an ETag.
+- **Protocol v2** (`backend/app/frames.py`): flat rows `[id, lon, lat, angle,
+  speed]`, static attributes (type, size, station) only when a vehicle first
+  appears (`vnew`), LOS rows every `APP_LOS_EVERY` frames, traffic lights only
+  on change, full `snapshot` for viewers that join mid-run.
+- **Live V2X index** (`replay.py`): incremental pcap parsing (only appended
+  bytes), sliding window + adaptive RX decimation in live mode (counts stay
+  exact), all time lookups by bisect.
+- **Frontend**: fleet registry mutated in place (0 allocations per animation
+  tick), glTF vehicles as **binary instanced attributes** (fp64 positions +
+  model matrices in preallocated typed arrays), the road network moved to
+  **native MapLibre layers with `feature-state`** LOS colouring (only visible
+  tiles are drawn — deck.gl used to redraw all 34k edges every tick), traffic
+  lights recoloured only when a phase changes, animation capped at 30/20/11 fps
+  by fleet size, and a **Modo ligero** switch (1× pixel ratio, no MSAA, 3D
+  buildings off) for laptops with integrated GPUs.
+
 ---
 
 ## Configuration reference (`APP_*` env vars)
@@ -255,6 +288,7 @@ Measured on the metropolitan net (34k edges, level *high*):
 | `APP_ORIGIN_LON` / `APP_ORIGIN_LAT` | Cuenca | ENU anchor for unprojected (synthetic) nets |
 | `APP_SUMO_HOST` / `APP_SUMO_PORT` | `sumo` / `8813` | TraCI server (remote mode) |
 | `APP_STEP_LENGTH` / `APP_MAX_FPS` | `1.0` / `10` | Sim step (s) / WS frame cap |
+| `APP_LOS_EVERY` | `7` | Send per-edge LOS rows every N frames (7 @ 10 fps ≈ 1.4 Hz, the viewer's recolour rate) |
 | `APP_USE_LIBSUMO` / `APP_CORS_ORIGINS` | `false` / `*` | In-process libsumo · CORS |
 
 **Remote mode** (reuse your own SUMO container):
@@ -291,8 +325,8 @@ city scale, MapLibre GL JS + deck.gl is the recommended runtime.
 
 ## Known limitations
 
-- glTF vehicle models don't render reliably in the deck.gl `<script>` bundle —
-  vehicles are procedural extrusions instead (offline and orientation-perfect).
+- glTF vehicles need the `@loaders.gl/gltf` bundle next to deck.gl (already in
+  `index.html`); if it fails to load, vehicles fall back to procedural extrusions.
 - Real shadow-mapping is unstable in the interleaved setup; realism comes from
   the preset-synced directional light + per-vehicle contact shadows.
 - The metro network has no building footprints (OSM extract without polygons).

@@ -19,6 +19,7 @@ const els = {
   tl: document.getElementById("toggle-tl"),
   poi: document.getElementById("toggle-poi"),
   busy: document.getElementById("toggle-busy"),
+  lite: document.getElementById("toggle-lite"),
   busyMin: document.getElementById("busy-min"),
   busyVal: document.getElementById("busy-val"),
   orbit: document.getElementById("orbit"),
@@ -111,21 +112,40 @@ function msgFilterOn(type) {
 
 let map, overlay, ws;
 let networkGeo = { type: "FeatureCollection", features: [] };
-let laneLinesGeo = { type: "FeatureCollection", features: [] };  // edges with 2+ lanes
-let edgeColors = {};      // edgeId -> [r,g,b]
 let edgeCounts = {};      // edgeId -> vehicle count (n) in the latest frame
 let edgeStats = {};       // edgeId -> full live stats {n, occ, speed, density, los}
 let edgeMid = {};         // edgeId -> [lon,lat] midpoint (for the busy-street icons)
-let losStamp = 0;         // bumped when a new LOS snapshot is accepted (throttled)
+let losActive = new Set();   // aristas con feature-state de color puesto
 let lastLosMs = 0;
 const LOS_UPDATE_MS = 700; // recolouring 34k+ edges every frame is wasteful — throttle it
-let vehicles = [];        // latest frame vehicles (interpolados para el render)
+const LOS_COLORS = { A: "#1a9850", B: "#66bd63", C: "#d9ef8b", D: "#fee08b", E: "#fc8d59", F: "#d73027" };
+let vehicles = [];        // flota actual (objetos del registro, mutados in-place)
+
+// --- modo ligero ------------------------------------------------------------
+// Portátiles con GPU integrada y pantallas retina: MapLibre renderiza a
+// devicePixelRatio 2 (4x píxeles) con MSAA. El modo ligero baja a 1x sin
+// antialias, oculta los edificios 3D por defecto y limita el tick de
+// animación. Se activa con ?lite=1 o con la casilla del panel (se recuerda).
+let liteMode = /[?&]lite=1/.test(location.search);
+try { if (localStorage.getItem("sumo-geo-lite") === "1") liteMode = true; } catch (_) {}
+
+// --- registro de flota (protocolo v2) ---------------------------------------
+// Cada vehículo es UN objeto que vive mientras el vehículo está en la
+// simulación: el frame trae [id, lon, lat, angle, speed] por vehículo y los
+// atributos estáticos (tipo, tamaño, station) solo la primera vez ("vnew").
+// La interpolación escribe lon/lat/angle in-place: 0 asignaciones por tick
+// (antes: un objeto nuevo por vehículo y tick -> 15k objetos/s con 500 veh).
+//   plon/plat/pang  posición DIBUJADA al llegar el frame (origen de la interp.)
+//   tlon/tlat/tang  objetivo (posición del frame)
+//   lon/lat/angle   posición dibujada ahora
+const vehById = new Map();
+let fleetChanged = true;       // membresía cambiada -> reconstruir grupos de render
 
 // --- interpolación de movimiento entre frames -------------------------------
 // Cada frame del backend avanza APP_STEP_LENGTH seg simulados de golpe (en modo
 // van3twin, 0.5-1 s): sin esto los vehículos "saltan". Entre frame y frame se
 // interpola posición y rumbo a ritmo de requestAnimationFrame.
-const INTERP_MAX_VEH = 1500;   // por encima, refresco directo (escenarios masivos)
+const INTERP_MAX_VEH = 4000;   // por encima, refresco directo (escenarios masivos)
 const INTERP_MAX_JUMP = 80;    // m; salto mayor = teletransporte/reinserción -> no interpolar
 // Factor de estiramiento de la ventana de interpolación. interpPeriod es una
 // MEDIA móvil del intervalo entre frames: la mitad de los frames llegan más
@@ -135,8 +155,6 @@ const INTERP_MAX_JUMP = 80;    // m; salto mayor = teletransporte/reinserción -
 // reinicia la interpolación desde la posición DIBUJADA, el pequeño retraso se
 // recupera solo, sin saltos (mismo enfoque que "render one interval behind").
 const INTERP_STRETCH = 1.30;
-let frameVehicles = [];        // último frame recibido (crudo)
-let interpPrev = new Map();    // id -> {lon,lat,angle} dibujados en el frame anterior
 let interpT0 = 0;              // performance.now() del último frame
 let interpPeriod = 100;        // ms entre frames (media móvil)
 
@@ -148,40 +166,85 @@ function metersBetween(lon1, lat1, lon2, lat2) {
   const kx = 111320 * Math.cos(lat1 * Math.PI / 180);
   return Math.hypot((lon2 - lon1) * kx, (lat2 - lat1) * 110540);
 }
-// Ritmo del tick adaptado al tamaño de la flota: interpolar 500 vehículos a
-// 60 fps recalcula demasiada geometría; mejor menos ticks pero fluidos.
+// Ritmo del tick adaptado al tamaño de la flota. Cada tick repinta TODA la
+// escena (mapa base + edificios + vehículos): 30 fps ya es fluido y cuesta la
+// mitad que 60; el modo ligero baja un escalón más.
 function interpMinInterval(n) {
-  if (n <= 150) return 0;      // cada rAF (~60 fps)
-  if (n <= 400) return 33;     // ~30 fps
-  if (n <= 800) return 50;     // ~20 fps
-  return 90;                   // ~11 fps
+  const lite = liteMode ? 1.5 : 1;
+  if (n <= 300) return 33 * lite;      // ~30 fps (20 en ligero)
+  if (n <= 800) return 50 * lite;      // ~20 fps
+  return 90 * lite;                    // ~11 fps
 }
 let interpLastDraw = 0;
 
 function interpTick() {
   requestAnimationFrame(interpTick);
   const now = performance.now();
-  if (now - interpLastDraw < interpMinInterval(frameVehicles.length)) return;
+  const n = vehById.size;
+  if (now - interpLastDraw < interpMinInterval(n)) return;
   const t = interpT0 ? Math.min((now - interpT0) / (interpPeriod * INTERP_STRETCH), 1) : 1;
-  const needVeh = !paused && frameVehicles.length > 0 &&
-    frameVehicles.length <= INTERP_MAX_VEH && t < 1;
+  const needVeh = !paused && n > 0 && n <= INTERP_MAX_VEH && t < 1;
   // animar fade aunque no haya interp.; en modo paso (congelado) no hace falta
   const needMsg = msgEvents.length > 0 && !(replayMode && paused);
   if (!needVeh && !needMsg) return;
   if (needVeh) {
-    vehicles = frameVehicles.map((v) => {
-      const p = interpPrev.get(v.id);
-      if (!p || metersBetween(p.lon, p.lat, v.lon, v.lat) > INTERP_MAX_JUMP) return v;
-      return { ...v,
-        lon: p.lon + (v.lon - p.lon) * t,
-        lat: p.lat + (v.lat - p.lat) * t,
-        angle: angleLerp(p.angle, v.angle, t) };
-    });
+    for (const v of vehById.values()) {
+      if (v.jump) continue;                     // teletransporte: ya está en el objetivo
+      v.lon = v.plon + (v.tlon - v.plon) * t;
+      v.lat = v.plat + (v.tlat - v.plat) * t;
+      v.angle = angleLerp(v.pang, v.tang, t);
+    }
   }
   interpLastDraw = now;
   refreshDynamicLayers();                      // vehículos + mensajes
 }
 requestAnimationFrame(interpTick);
+
+// Aplica un frame v2 al registro. Devuelve el nº de vehículos.
+function applyFrameVehicles(msg) {
+  if (msg.snapshot) { vehById.clear(); fleetChanged = true; }
+  const vnew = msg.vnew || {};
+  for (const id in vnew) {
+    if (vehById.has(id)) continue;
+    const a = vnew[id];
+    vehById.set(id, { id, type: a[0] || "", len: a[1] || 4.5, wid: a[2] || 1.8,
+      station: a[3] == null ? null : a[3], cls: null, variant: 0,
+      lon: 0, lat: 0, angle: 0, speed: 0, plon: 0, plat: 0, pang: 0,
+      tlon: 0, tlat: 0, tang: 0, jump: true, fresh: true });
+    fleetChanged = true;
+  }
+  const rows = msg.v || [];
+  const seen = msg.snapshot ? new Set() : null;
+  const jumpAll = paused || vehById.size > INTERP_MAX_VEH;
+  for (let i = 0; i + 4 < rows.length; i += 5) {
+    const id = rows[i];
+    let v = vehById.get(id);
+    if (!v) {                                    // vnew perdido: crear con defaults
+      v = { id, type: "", len: 4.5, wid: 1.8, station: null, cls: null, variant: 0,
+        lon: 0, lat: 0, angle: 0, speed: 0, plon: 0, plat: 0, pang: 0,
+        tlon: 0, tlat: 0, tang: 0, jump: true, fresh: true };
+      vehById.set(id, v); fleetChanged = true;
+    }
+    if (seen) seen.add(id);
+    const lon = rows[i + 1], lat = rows[i + 2], ang = rows[i + 3];
+    v.speed = rows[i + 4];
+    if (v.fresh) {                               // primera vez: sin interpolar
+      v.fresh = false; v.jump = true;
+      v.lon = v.plon = v.tlon = lon; v.lat = v.plat = v.tlat = lat;
+      v.angle = v.pang = v.tang = ang;
+      continue;
+    }
+    // origen = lo DIBUJADO ahora; objetivo = el frame nuevo
+    v.plon = v.lon; v.plat = v.lat; v.pang = v.angle;
+    v.tlon = lon; v.tlat = lat; v.tang = ang;
+    v.jump = jumpAll || metersBetween(v.plon, v.plat, lon, lat) > INTERP_MAX_JUMP;
+    if (v.jump) { v.lon = lon; v.lat = lat; v.angle = ang; }
+  }
+  if (msg.vgone) for (const id of msg.vgone) { if (vehById.delete(id)) fleetChanged = true; }
+  if (seen) for (const id of [...vehById.keys()]) { if (!seen.has(id)) { vehById.delete(id); fleetChanged = true; } }
+  if (fleetChanged) vehicles = [...vehById.values()];
+  return vehById.size;
+}
 let tlDefs = { type: "FeatureCollection", features: [] };  // static signal positions
 let tlState = {};         // tlsID -> live state string ("GrGr...")
 let paused = false;
@@ -315,32 +378,73 @@ function vehClass(d) {
   if (isBus(d)) return "bus";
   return "car";
 }
-function makeVehicleModelLayers() {
-  // una capa por VARIANTE de modelo (instancing por .glb); la variante de cada
-  // vehículo sale del hash de su id -> estable entre frames
-  const groups = new Map();
+
+// Grupos de render: uno por variante de modelo. Cada grupo tiene sus arrays
+// tipados PREASIGNADOS (posición fp64 y matriz de modelo 3x4) que la
+// interpolación rellena in-place cada tick; deck.gl los sube a la GPU tal cual
+// (atributos binarios: sin llamar a un accessor por instancia ni crear
+// objetos). Solo se recomponen cuando cambia la membresía de la flota.
+const vehGroups = new Map();     // key -> {m, list, n, pos, mat, cap}
+const RAD = Math.PI / 180;
+function rebuildVehGroups() {
+  for (const g of vehGroups.values()) g.list.length = 0;
   for (const v of vehicles) {
-    const k = vehClass(v);
-    const vars = VEH_MODELS[k];
-    const i = vars.length > 1 ? hashId(v.id) % vars.length : 0;
-    let g = groups.get(k + "-" + i);
-    if (!g) groups.set(k + "-" + i, g = { m: vars[i], data: [] });
-    g.data.push(v);
+    if (v.cls === null) {
+      v.cls = vehClass(v);
+      const vars = VEH_MODELS[v.cls];
+      v.variant = vars.length > 1 ? hashId(v.id) % vars.length : 0;
+    }
+    const key = v.cls + "-" + v.variant;
+    let g = vehGroups.get(key);
+    if (!g) vehGroups.set(key, g = { m: VEH_MODELS[v.cls][v.variant], list: [], n: 0,
+                                     pos: null, mat: null, cap: 0 });
+    g.list.push(v);
   }
+  for (const [key, g] of vehGroups) {
+    g.n = g.list.length;
+    if (g.n === 0) { vehGroups.delete(key); continue; }
+    if (g.n > g.cap) {                          // crecer con margen (pocas realloc.)
+      g.cap = Math.max(64, Math.ceil(g.n * 1.5));
+      g.pos = new Float64Array(g.cap * 3);
+      g.mat = new Float32Array(g.cap * 12);
+    }
+  }
+  fleetChanged = false;
+}
+function fillVehGroup(g) {
+  const { pos, mat, list, m } = g;
+  const yawOff = m.yawOff || 0;
+  for (let i = 0; i < g.n; i++) {
+    const v = list[i];
+    pos[i * 3] = v.lon; pos[i * 3 + 1] = v.lat; pos[i * 3 + 2] = 0;
+    // misma matriz que calcula deck.gl (utils/matrix.ts) con pitch=roll=0:
+    // columnas = rotación yaw (antihoraria, Z) × escala [sx, sy, sz]
+    const s = (v.len || m.len) / m.len, sx = (v.wid || m.wid) / m.wid, sz = (s + 1) / 2;
+    const yaw = (MODEL_YAW(v.angle) + yawOff) * RAD;
+    const cw = Math.cos(yaw), sw = Math.sin(yaw);
+    const o = i * 12;
+    mat[o] = sx * cw;  mat[o + 1] = sx * sw;  mat[o + 2] = 0;
+    mat[o + 3] = -s * sw; mat[o + 4] = s * cw;  mat[o + 5] = 0;
+    mat[o + 6] = 0;    mat[o + 7] = 0;         mat[o + 8] = sz;
+    mat[o + 9] = 0;    mat[o + 10] = 0;        mat[o + 11] = 0;
+  }
+}
+function makeVehicleModelLayers() {
+  if (fleetChanged) rebuildVehGroups();
   const out = [];
-  for (const [key, g] of groups) {
-    const m = g.m;
+  for (const [key, g] of vehGroups) {
+    fillVehGroup(g);
     out.push(new deck.ScenegraphLayer({
       id: "veh-glb-" + key,
-      data: g.data,
-      scenegraph: m.url,             // misma URL entre ticks -> no se recarga
+      // atributos binarios: {length, attributes} en vez de objetos; el objeto
+      // envoltorio es nuevo cada tick para que deck.gl detecte el cambio, los
+      // arrays subyacentes no se reasignan
+      data: { length: g.n, attributes: {
+        getPosition: { value: g.pos, size: 3 },
+        instanceModelMatrix: { value: g.mat, size: 12 },
+      } },
+      scenegraph: g.m.url,           // misma URL entre ticks -> no se recarga
       loaders: [loaders.GLTFLoader],
-      getPosition: (d) => [d.lon, d.lat, 0],
-      getOrientation: (d) => [0, MODEL_YAW(d.angle) + (m.yawOff || 0), 0],
-      getScale: (d) => {
-        const s = (d.len || m.len) / m.len;
-        return [(d.wid || m.wid) / m.wid, s, (s + 1) / 2];
-      },
       sizeScale: 1,
       _lighting: "pbr",
       pickable: true,
@@ -349,6 +453,7 @@ function makeVehicleModelLayers() {
   }
   return out;
 }
+function vehGroupOf(layerId) { return vehGroups.get(layerId.replace(/^veh-glb-/, "")); }
 
 // LOD: with thousands of vehicles (or zoomed far out) the small parts are
 // sub-pixel — draw shadow + one body box per vehicle instead of 8 parts.
@@ -429,6 +534,8 @@ function applyLightPreset(name) {
       ["interpolate", ["linear"], ["get", "height"]].concat(p.buildings));
   }
   asphaltColor = p.asphalt;
+  if (map.getLayer("road-casing")) map.setPaintProperty("road-casing", "line-color", rgbCss(darken(p.asphalt, 0.55)));
+  repaintRoads();
   if (els.tint) { els.tint.style.background = p.tint; els.tint.style.mixBlendMode = p.blend; }
   refreshLayers();
   for (const k of ["dawn", "day", "dusk", "night"]) {
@@ -612,10 +719,16 @@ async function boot() {
     center: meta.center,
     zoom: 15.5,
     pitch: 55,
-    maxPitch: 85,
+    maxPitch: liteMode ? 70 : 85,
     bearing: -18,
-    antialias: true,
+    // modo ligero: 1 píxel por píxel CSS (4x menos fragmentos en pantallas
+    // retina) y sin MSAA; ver liteMode arriba
+    antialias: !liteMode,
+    pixelRatio: liteMode ? 1 : undefined,
+    fadeDuration: liteMode ? 0 : 300,
   });
+  if (els.lite) { els.lite.checked = liteMode; }
+  mapCenterLat = meta.center[1];
   // cancelar órbita/seguimiento SOLO con gestos del usuario. OJO: jumpTo/setBearing
   // disparan "rotatestart" también (programático, sin originalEvent) — sin el
   // guard, el propio jumpTo de la cámara cockpit cancelaba el seguimiento en el
@@ -639,6 +752,33 @@ async function boot() {
     applyBasemapColors();   // exact Mapbox Standard "day" palette (land/green/road/water)
     setPoiVisible(els.poi.checked);   // hide shop/bus-stop POI clutter by default
 
+    // --- road network: capas NATIVAS de MapLibre (antes: 3 GeoJsonLayer de
+    // deck.gl que redibujaban las 34k aristas enteras en cada tick). MapLibre
+    // tesela la red en un worker y solo pinta los tiles visibles; la
+    // congestión se aplica por feature-state (solo las ~200 aristas con
+    // tráfico cambian), no recreando la capa. Se insertan ANTES de los
+    // edificios para que estos las oculten.
+    networkGeo = await fetchJSON("/api/network");
+    edgeMid = {};
+    for (const f of networkGeo.features) {
+      const c = f.geometry.coordinates;
+      edgeMid[f.properties.id] = c[Math.floor(c.length / 2)];
+      f.properties.w = roadW(f);                 // ancho real de calzada (m)
+    }
+    map.addSource("roads", { type: "geojson", data: networkGeo, promoteId: "id",
+                             tolerance: 0.35, buffer: 32 });
+    map.addLayer({ id: "road-casing", type: "line", source: "roads",
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": "#404656", "line-width": metersToPx(["+", ["get", "w"], 0.6]) } },
+      labelLayerId);
+    map.addLayer({ id: "road-surface", type: "line", source: "roads",
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": roadColorExpr(), "line-width": metersToPx(["get", "w"]) } },
+      labelLayerId);
+    map.addLayer({ id: "lane-lines", type: "line", source: "roads",
+      filter: [">=", ["get", "lanes"], 2],
+      paint: { "line-color": "#f2f2ec", "line-width": metersToPx(0.3, 0.6, 2) } },
+      labelLayerId);
     // --- extruded building polygons (native MapLibre fill-extrusion) --------
     const buildings = await fetchJSON("/api/buildings");
     map.addSource("buildings", { type: "geojson", data: buildings });
@@ -660,14 +800,8 @@ async function boot() {
     }, labelLayerId);
     setBuildingsVisible(els.buildings.checked);   // default: unchecked -> all buildings hidden
 
-    // --- road network (deck.gl overlay, recoloured by congestion) ----------
-    networkGeo = await fetchJSON("/api/network");
-    laneLinesGeo = { type: "FeatureCollection",
-      features: networkGeo.features.filter((f) => (f.properties.lanes || 1) >= 2) };
-    edgeMid = {};
-    for (const f of networkGeo.features) {
-      const c = f.geometry.coordinates;
-      edgeMid[f.properties.id] = c[Math.floor(c.length / 2)];
+    if (liteMode && els.buildings.checked) {     // ligero: edificios apagados al inicio
+      els.buildings.checked = false; setBuildingsVisible(false);
     }
     tlDefs = await fetchJSON("/api/trafficlights");
     splitTrafficLights();
@@ -688,9 +822,38 @@ function busyColor(n) {
 }
 
 const roadW = (f) => 3.2 * (f.properties.lanes || 1);          // real carriageway width
-// Static layers are created ONCE and reused across frames — recreating them per
-// frame made deck.gl re-diff the 34k-edge geometries at every simulation step.
-let _casingLayer = null, _laneLayer = null;
+let mapCenterLat = 0;
+// Ancho en METROS para una capa "line" de MapLibre (que mide en píxeles):
+// px = m · 2^z / (C · cos(lat) / 512) — interpolación exponencial en zoom.
+function metersToPx(mExpr, minPx = 0, maxPx = 1e9) {
+  const mpp0 = 40075016.686 * Math.cos(mapCenterLat * Math.PI / 180) / 512;   // m/px a z=0
+  const at = (z) => ["min", maxPx, ["max", minPx, ["*", mExpr, Math.pow(2, z) / mpp0]]];
+  return ["interpolate", ["exponential", 2], ["zoom"], 8, at(8), 22, at(22)];
+}
+const rgbCss = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
+// color de calzada: LOS por feature-state si hay congestión activa; si no, asfalto
+function roadColorExpr() {
+  return showCongestion ? ["coalesce", ["feature-state", "c"], rgbCss(asphaltColor)]
+                        : rgbCss(asphaltColor);
+}
+function repaintRoads() {
+  if (map && map.getLayer("road-surface")) map.setPaintProperty("road-surface", "line-color", roadColorExpr());
+}
+// aplica un lote de aristas LOS (filas compactas [id,n,occ,speed,density,los])
+function applyEdges(rows) {
+  edgeCounts = {}; edgeStats = {};
+  const next = new Set();
+  for (const r of rows) {
+    const id = r[0];
+    edgeCounts[id] = r[1];
+    edgeStats[id] = { n: r[1], occ: r[2], speed: r[3], density: r[4], los: r[5] };
+    next.add(id);
+    if (map) map.setFeatureState({ source: "roads", id }, { c: LOS_COLORS[r[5]] || "#888" });
+  }
+  if (map) for (const id of losActive) if (!next.has(id)) map.removeFeatureState({ source: "roads", id });
+  losActive = next;
+}
+let tlStamp = 0;          // bumped only when a traffic-light state string changes
 
 // procedural 3D vehicles (shadow, chassis, wheels, windshield, roof, lights),
 // with LOD: simple boxes when there are thousands of vehicles or zoomed out.
@@ -768,51 +931,8 @@ function makeDetectionLayer() {
 }
 
 function buildLayers() {
-  if (!_casingLayer) {
-    // dark casing under the roads -> crisp, defined edges (surface colour unchanged)
-    _casingLayer = new deck.GeoJsonLayer({
-      id: "network-casing",
-      data: networkGeo,
-      beforeId: labelLayerId,
-      lineWidthUnits: "meters",
-      getLineWidth: (f) => roadW(f) + 0.3,
-      lineWidthMinPixels: 2.5,
-      getLineColor: [64, 70, 86],
-      lineCapRounded: true, lineJointRounded: true,
-      pickable: false,
-    });
-    // lane divider: thin centre line on carriageways with 2+ lanes
-    _laneLayer = new deck.GeoJsonLayer({
-      id: "lane-lines",
-      data: laneLinesGeo,
-      beforeId: labelLayerId,
-      lineWidthUnits: "meters",
-      getLineWidth: 0.3,
-      lineWidthMinPixels: 0.8,
-      lineWidthMaxPixels: 2,
-      getLineColor: [242, 242, 236],
-      pickable: false,
-    });
-  }
-  const layers = [
-    _casingLayer,
-    // road surface — LOS colour when congested, else asphalt. losStamp (throttled)
-    // is the trigger, so the 34k-edge recolour runs ~1.4x/s instead of every frame.
-    new deck.GeoJsonLayer({
-      id: "network",
-      data: networkGeo,
-      beforeId: labelLayerId,
-      lineWidthUnits: "meters",
-      getLineWidth: roadW,
-      lineWidthMinPixels: 1.5,
-      getLineColor: (f) =>
-        (showCongestion && edgeColors[f.properties.id]) || asphaltColor,
-      lineCapRounded: true, lineJointRounded: true,
-      updateTriggers: { getLineColor: [losStamp, showCongestion, asphaltColor] },
-      pickable: true,                              // right-click inspector
-    }),
-    _laneLayer,
-  ];
+  // la red vial vive en MapLibre (ver boot); aquí solo capas dinámicas de deck
+  const layers = [];
 
   // traffic lights, coloured live from SUMO. Open junctions get a mast-arm
   // ("ménsula") with the head hanging over the road; tight ones a straight pole.
@@ -852,7 +972,9 @@ function buildLayers() {
       getRadius: 1.25, radiusUnits: "meters", radiusMinPixels: 3.5, radiusMaxPixels: 13,
       parameters: TL_ON_TOP,
       pickable: true,                              // right-click inspector
-      updateTriggers: { getFillColor: [tlState] },
+      // solo se recolorean cuando el backend manda un cambio de fase (tlStamp),
+      // no en cada frame
+      updateTriggers: { getFillColor: [tlStamp] },
     }));
   }
 
@@ -1050,9 +1172,27 @@ const TL_CODE = { G: "verde (prioridad)", g: "verde", y: "ámbar", Y: "ámbar",
 // vehículo bajo el pick, venga de la capa de cajas (pieza con .veh) o de una
 // capa glTF (el objeto ES el vehículo)
 function pickedVehicle(info) {
-  if (info.layer.id === "vehicles" && info.object.veh) return info.object.veh;
-  if (/^veh-glb-/.test(info.layer.id)) return info.object;
+  if (info.layer.id === "vehicles" && info.object && info.object.veh) return info.object.veh;
+  if (/^veh-glb-/.test(info.layer.id)) {      // datos binarios: solo llega el índice
+    const g = vehGroupOf(info.layer.id);
+    return (g && info.index >= 0 && info.index < g.n) ? g.list[info.index] : null;
+  }
   return null;
+}
+
+function roadHtml(f) {
+  const p = f.properties, s = edgeStats[p.id];
+  let html = `<h3>Calle ${p.id}</h3>` +
+    `Carriles: <b>${p.lanes}</b> · Longitud: <b>${p.length} m</b><br>` +
+    `Vel. máxima: <b>${Math.round(p.speed * 3.6)} km/h</b>`;
+  if (s) {
+    html += `<br>Vehículos ahora: <b>${s.n}</b> · LOS: <b>${s.los}</b><br>` +
+      `Densidad: <b>${s.density} veh/km/carril</b><br>` +
+      `Vel. media: <b>${Math.round(s.speed * 3.6)} km/h</b> · Ocupación: <b>${Math.round(s.occ * 100)}%</b>`;
+  } else {
+    html += `<br>Sin tráfico en este momento (flujo libre)`;
+  }
+  return html;
 }
 
 function inspectorHtml(info) {
@@ -1063,25 +1203,11 @@ function inspectorHtml(info) {
     return `<h3>Vehículo ${d.id}</h3>` +
       `Tipo: <b>${d.type}</b><br>` +
       `Velocidad: <b>${Math.round(d.speed * 3.6)} km/h</b> · Rumbo: <b>${Math.round(d.angle)}°</b><br>` +
-      `Dimensiones: <b>${d.len} × ${d.wid} m</b><br>` +
-      `Calle (edge): <b>${d.edge}</b>` +
+      `Dimensiones: <b>${d.len} × ${d.wid} m</b>` +
       `<button id="popup-follow" style="margin-top:8px;width:100%;pointer-events:auto">🎥 Seguir este vehículo</button>` +
       `<div id="popup-extra" style="margin-top:6px;border-top:1px solid #1c4370;padding-top:6px;opacity:.8">cargando estadísticas…</div>`;
   }
-  if (info.layer.id === "network") {
-    const p = o.properties, s = edgeStats[p.id];
-    let html = `<h3>Calle ${p.id}</h3>` +
-      `Carriles: <b>${p.lanes}</b> · Longitud: <b>${p.length} m</b><br>` +
-      `Vel. máxima: <b>${Math.round(p.speed * 3.6)} km/h</b>`;
-    if (s) {
-      html += `<br>Vehículos ahora: <b>${s.n}</b> · LOS: <b>${s.los}</b><br>` +
-        `Densidad: <b>${s.density} veh/km/carril</b><br>` +
-        `Vel. media: <b>${Math.round(s.speed * 3.6)} km/h</b> · Ocupación: <b>${Math.round(s.occ * 100)}%</b>`;
-    } else {
-      html += `<br>Sin tráfico en este momento (flujo libre)`;
-    }
-    return html;
-  }
+  if (!o) return null;
   if (info.layer.id === "tl-head" || info.layer.id === "tl-housing") {
     const p = o.properties;
     const st = tlState[p.tls];
@@ -1194,7 +1320,12 @@ function setupInspector() {
     const info = overlay.pickObject({
       x: e.clientX - rect.left, y: e.clientY - rect.top, radius: 8,
     });
-    const html = info && info.object ? inspectorHtml(info) : null;
+    let html = info && (info.object || info.index >= 0) ? inspectorHtml(info) : null;
+    if (!html) {                                 // ¿una calle? (capa MapLibre)
+      const feats = map.queryRenderedFeatures([e.clientX - rect.left, e.clientY - rect.top],
+                                              { layers: ["road-surface"] });
+      if (feats && feats.length) html = roadHtml(feats[0]);
+    }
     if (!html) { popup.style.display = "none"; pendingInspect = null; return; }
     popup.classList.remove("interactive");   // el inspector rápido no captura el ratón
     popup.innerHTML = html;
@@ -1230,7 +1361,8 @@ function applyInspect(msg) {
     `Combustible: <b>${f(msg.fuel, 1)} mg/s</b><br>` +
     `Espera: <b>${f(msg.waiting, 0)} s</b> (acum. <b>${f(msg.waiting_acc, 0)} s</b>)<br>` +
     `Retraso vs. flujo libre: <b>${f(msg.timeloss, 0)} s</b><br>` +
-    `Recorrido: <b>${f((msg.distance || 0) / 1000, 2)} km</b> · Carril: <b>${msg.lane || "–"}</b><br>` +
+    `Recorrido: <b>${f((msg.distance || 0) / 1000, 2)} km</b><br>` +
+    `Calle: <b>${msg.edge || "–"}</b> · Carril: <b>${msg.lane || "–"}</b><br>` +
     `Ruta: tramo <b>${(msg.route_index ?? 0) + 1} / ${msg.route_edges ?? "–"}</b>`;
 }
 
@@ -1253,31 +1385,21 @@ function connect() {
     if (sock !== ws) return;                        // drop frames from an old/switched-out run
     const msg = JSON.parse(ev.data);
     if (msg.type === "frame") {
-      // continuidad: el punto de partida de la interpolación es lo que está
-      // dibujado AHORA (vehicles), no el frame crudo anterior
-      interpPrev = new Map(vehicles.map((v) => [v.id, { lon: v.lon, lat: v.lat, angle: v.angle }]));
       const nowMs = performance.now();
       if (interpT0) {
         interpPeriod = Math.min(Math.max(0.8 * interpPeriod + 0.2 * (nowMs - interpT0), 30), 2000);
       }
       interpT0 = nowMs;
-      frameVehicles = msg.vehicles;            // OBJETIVO de la interpolación
-      // OJO: no asignar vehicles aquí — pintar ya la posición nueva provocaba
-      // salto + retroceso en el primer tick. Los ticks deslizan hacia
-      // frameVehicles; el refreshLayers() de abajo repinta LOS/semáforos con
-      // los vehículos donde están dibujados ahora.
-      // interp. desactivada con flotas enormes; y en modo paso (pausado) los
-      // vehículos deben SALTAR a la posición del frame (la interp. no corre)
-      if (paused || frameVehicles.length > INTERP_MAX_VEH) vehicles = frameVehicles;
+      // protocolo v2: el registro se actualiza in-place (origen = lo dibujado
+      // AHORA, objetivo = el frame nuevo); los ticks deslizan hacia el objetivo
+      const nVeh = applyFrameVehicles(msg);
       const now = performance.now();
-      if (now - lastLosMs >= LOS_UPDATE_MS) {      // throttled LOS/count snapshot
-        edgeColors = {}; edgeCounts = {}; edgeStats = {};
-        for (const e of msg.edges) {
-          edgeColors[e.id] = hexToRgb(e.color); edgeCounts[e.id] = e.n; edgeStats[e.id] = e;
-        }
-        losStamp++; lastLosMs = now;
+      // aristas LOS: el backend ya las manda solo cada ~0.7 s; se aplican por
+      // feature-state (solo cambian las aristas con tráfico)
+      if (msg.edges && now - lastLosMs >= LOS_UPDATE_MS) {
+        applyEdges(msg.edges); lastLosMs = now;
       }
-      tlState = msg.tls || {};
+      if (msg.tls) { tlState = msg.tls; tlStamp++; }   // solo cuando cambia una fase
       // mensajes V2X en vivo: al llegar los primeros, revelar los controles
       // de mensajes y el panel PHY (estadísticas de la corrida EN CURSO,
       // refrescadas periódicamente vía /api/replay/info?live=1)
@@ -1294,9 +1416,9 @@ function connect() {
       // filtro de emisor en vivo: poblar el selector con las estaciones que
       // van apareciendo (los vehículos traen station del backend), conservando
       // la selección actual si sigue existiendo
-      if (!replayMode && liveV2xSeen) {
+      if (!replayMode && liveV2xSeen && (msg.vnew || msg.snapshot)) {
         let changed = false;
-        for (const v of msg.vehicles) {
+        for (const v of vehById.values()) {
           if (v.station != null && !liveStations.has(v.station)) {
             liveStations.add(v.station); changed = true;
           }
@@ -1315,7 +1437,7 @@ function connect() {
       if (msg.messages && showMsgs) {
         if (replayMode && paused) msgEvents = [];   // modo paso: solo ESTE paso
         const posOf = {};
-        for (const v of msg.vehicles) posOf[v.station] = [v.lon, v.lat];
+        for (const v of vehById.values()) if (v.station != null) posOf[v.station] = [v.tlon, v.tlat];
         const wall = performance.now();
         for (const e of msg.messages.tx) {
           if (posOf[e.tx]) msgEvents.push({ kind: "tx", type: e.type, simT: e.t,
@@ -1335,10 +1457,12 @@ function connect() {
         els.rpTimeCur.textContent = fmtClock(msg.t);
         if (!rpDragging) { els.rpSeek.value = msg.t; updateSeekFill(); }
       }
-      if (msg.stats) updateHistory(msg.stats, frameVehicles.length, msg.t);
-      els.vehCount.textContent = frameVehicles.length;
+      if (msg.stats) updateHistory(msg.stats, nVeh, msg.t);
+      els.vehCount.textContent = nVeh;
       els.simTime.textContent = msg.t;
-      refreshLayers();
+      // solo semáforos/concurridas cambian por frame: refresco barato; el
+      // completo (buildLayers) solo si cambió una fase o hay pins de calles
+      if (msg.tls || showBusy) refreshLayers(); else refreshDynamicLayers();
     } else if (msg.type === "meta") {
       const isReplay = msg.mode === "replay";
       liveV2xSeen = false;                       // nueva conexión: re-detectar V2X en vivo
@@ -1419,10 +1543,13 @@ els.play.onclick = () => {
   setPaused(!paused);
   send({ cmd: paused ? "pause" : "play" });
 };
+function clearFleet() {
+  vehById.clear(); vehicles = []; fleetChanged = true; interpT0 = 0;
+  applyEdges([]);
+}
 els.reset.onclick = () => {
   if (ws) ws.close();
-  vehicles = []; frameVehicles = []; interpPrev = new Map(); interpT0 = 0;
-  edgeColors = {}; refreshLayers();
+  clearFleet(); refreshLayers();
   paused = false; els.play.textContent = "⏸ Pausar";
   connect();
 };
@@ -1436,8 +1563,8 @@ els.replayBtn.onclick = () => {
   replayMode = !replayMode;
   els.replayBtn.textContent = replayMode ? "🔴 Volver al modo en vivo" : "🎞 Replay pcap";
   if (ws) ws.close();
-  vehicles = []; frameVehicles = []; interpPrev = new Map(); interpT0 = 0;
-  msgEvents = []; edgeColors = {}; tlState = {}; refreshLayers();
+  clearFleet();
+  msgEvents = []; tlState = {}; tlStamp++; refreshLayers();
   paused = false; els.play.textContent = "⏸ Pausar";
   if (!replayMode) {
     els.replayBar.style.display = "none";
@@ -1463,7 +1590,7 @@ els.rpStep.onclick = () => {
 };
 els.rpBack.onclick = () => {
   setPaused(true);
-  interpPrev = new Map(); interpT0 = 0;   // sin interpolar el salto hacia atrás
+  interpT0 = 0;                           // sin interpolar el salto hacia atrás
   send({ cmd: "step_back" });
 };
 els.vehFilter.onchange = () => {
@@ -1496,7 +1623,8 @@ els.rpSeek.oninput = () => {
   els.rpTimeCur.textContent = fmtClock(els.rpSeek.value);
   updateSeekFill();
   send({ cmd: "seek", t: Number(els.rpSeek.value) });
-  interpPrev = new Map(); interpT0 = 0; msgEvents = [];   // sin interpolar el salto
+  interpT0 = 0; msgEvents = [];                            // sin interpolar el salto
+  for (const v of vehById.values()) v.fresh = true;        // el próximo frame: saltar
 };
 els.rpSeek.onchange = () => {
   rpDragging = false;
@@ -1621,7 +1749,11 @@ function showMsgDetail(d) {
                              popup.classList.remove("interactive"); };
 }
 els.buildings.onchange = () => setBuildingsVisible(els.buildings.checked);
-els.congestion.onchange = () => { showCongestion = els.congestion.checked; refreshLayers(); };
+els.congestion.onchange = () => { showCongestion = els.congestion.checked; repaintRoads(); };
+if (els.lite) els.lite.onchange = () => {
+  try { localStorage.setItem("sumo-geo-lite", els.lite.checked ? "1" : "0"); } catch (_) {}
+  location.reload();                          // pixelRatio/antialias se fijan al crear el mapa
+};
 els.tl.onchange = () => { showTL = els.tl.checked; refreshLayers(); };
 els.poi.onchange = () => setPoiVisible(els.poi.checked);
 els.busy.onchange = () => { showBusy = els.busy.checked; refreshLayers(); };

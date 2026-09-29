@@ -28,36 +28,90 @@ El backend mantiene UNA conexión (el *hub*) durante toda la corrida:
   para que ns-3 no avance sin que nadie lo vea;
 * cuando SUMO termina (fin de la corrida o ``--quit-on-end``) el hub vuelve a
   esperar la siguiente: se puede relanzar ``./ns3 run`` sin reiniciar nada.
+
+Rendimiento (2026-09-29)
+------------------------
+* El frame se serializa UNA vez (orjson) y se manda el mismo texto a todos.
+* Cada visor tiene su propia tarea de envío con una cola de UN frame: si un
+  navegador va lento (pestaña en segundo plano, portátil justo), se descarta
+  su frame atrasado y recibe el siguiente. Un visor lento ya no frena el
+  lockstep con ns-3 ni a los demás visores (*backpressure*).
+* Protocolo v2 compacto (ver ``frames.py``): un visor que se conecta a mitad
+  de corrida recibe un *snapshot* con la flota completa y a partir de ahí
+  solo deltas.
 """
 from __future__ import annotations
 
 import asyncio
-import re
 import traceback
-from collections import Counter
 
 from fastapi import WebSocket, WebSocketDisconnect
 
 from .config import settings
+from .frames import FrameBuilder, encode
 from .sumo_bridge import SumoBridge
-from .traffic import edge_estimation
+
+
+_FRAME = object()          # marcador en la cola: "manda el último frame"
+
+
+class Viewer:
+    """Un navegador suscrito. Los mensajes de control van en orden por una
+    cola sin límite; los frames se COALESCEN: solo se conserva el más reciente
+    y en la cola hay como mucho un marcador pendiente. Un visor lento recibe
+    menos frames (nunca frames viejos) y no frena al hub ni a los demás."""
+
+    def __init__(self, ws: WebSocket):
+        self.ws = ws
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.frame: str | None = None            # último frame no enviado
+        self.dropped = 0
+        self.task: asyncio.Task | None = None
+
+    def push(self, text: str, coalesce: bool = True) -> None:
+        """Encolar sin bloquear jamás."""
+        if not coalesce:
+            self.queue.put_nowait(text)
+            return
+        if self.frame is not None:               # había uno sin enviar: se sustituye
+            self.dropped += 1
+            self.frame = text
+            return
+        self.frame = text
+        self.queue.put_nowait(_FRAME)
+
+    async def sender(self) -> None:
+        try:
+            while True:
+                item = await self.queue.get()
+                if item is _FRAME:
+                    text, self.frame = self.frame, None
+                    if text is None:
+                        continue
+                else:
+                    text = item
+                await self.ws.send_text(text)
+        except Exception:
+            return
 
 
 class LiveHub:
     def __init__(self, state: dict, live_rep_nowait):
         self._state = state                 # _state de main: netgeo, meta
         self._live_rep = live_rep_nowait    # índice V2X en vivo (nunca bloquea)
-        self.viewers: set[WebSocket] = set()
+        self.viewers: dict[WebSocket, Viewer] = {}
         self.status = "waiting"             # waiting | running | ended
         self.detail = ""                    # texto legible para el visor
         self.paused = False
         self.period = 1.0 / max(settings.max_fps, 0.1)
         self.bridge: SumoBridge | None = None
+        self.builder = FrameBuilder(state["netgeo"], settings.los_every)
         self.last_frame: dict | None = None
         self.t = 0.0
         self._lock = asyncio.Lock()         # un solo comando TraCI a la vez
         self._task: asyncio.Task | None = None
         self._sent_v2x: set = set()
+        self.frame_ms = 0.0                 # coste medio del último frame (diagnóstico)
 
     # ------------------------------------------------------------------ ciclo
     def start(self) -> None:
@@ -102,6 +156,7 @@ class LiveHub:
                 continue
             self.bridge = bridge
             self._sent_v2x = set()
+            self.builder.reset()
             self.last_frame = None
             self.t = 0.0
             self.paused = False        # cada corrida arranca en marcha
@@ -111,42 +166,41 @@ class LiveHub:
             return
 
     async def _stream(self) -> None:
-        netgeo = self._state["netgeo"]
+        import time as _time
+        loop = asyncio.get_running_loop()
         while True:
             if self.paused or (settings.hold_without_viewers and not self.viewers):
                 await asyncio.sleep(0.05)
                 continue
+            t0 = loop.time()
             try:
                 async with self._lock:
-                    frame, done = await asyncio.to_thread(self._collect, netgeo)
+                    frame, done = await asyncio.to_thread(self._collect)
             except Exception as exc:  # noqa: BLE001 - SUMO se fue (fin de corrida)
                 print(f"[live_hub] conexión TraCI perdida: {exc}", flush=True)
                 await self._finish()
                 return
             self._attach_live_v2x(frame)
             self.last_frame = frame
-            await self._broadcast(frame)
+            self._broadcast_frame(frame)
+            self.frame_ms = 0.8 * self.frame_ms + 0.2 * 1000 * (loop.time() - t0)
             if done:
                 await self._finish()
                 return
-            await asyncio.sleep(self.period)
+            # cadencia: descontar lo que ya tardó el frame (antes se sumaban
+            # ambos y a 10 fps pedidos salían ~8 reales)
+            await asyncio.sleep(max(self.period - (loop.time() - t0), 0.0))
 
-    def _collect(self, netgeo):
+    def _collect(self):
         """Corre en un hilo: un paso de lockstep + lectura del estado (bloquea
-        en el socket mientras ns-3 calcula su parte)."""
+        en el socket mientras ns-3 calcula su parte). Round-trips por frame:
+        simulationStep (trae flota + semáforos + variables de simulación)."""
         b = self.bridge
         t = b.step()
-        vehs = b.vehicles(netgeo)
-        stats = b.frame_stats()
-        stats["types"] = dict(Counter(v["type"] for v in vehs))
-        frame = {
-            "type": "frame",
-            "t": round(t, 1),
-            "vehicles": vehs,
-            "edges": edge_estimation(b.conn, netgeo, (v["edge"] for v in vehs)),
-            "tls": b.trafficlights(),
-            "stats": stats,
-        }
+        vehs = b.vehicles(self._state["netgeo"])
+        frame = self.builder.build(t, vehs, b.frame_stats(), b.edge_agg,
+                                   b.trafficlights_if_changed(),
+                                   with_station=bool(settings.live_pcap_dir))
         self.t = t
         return frame, b.min_expected_number() <= 0
 
@@ -155,10 +209,6 @@ class LiveHub:
         if not settings.live_pcap_dir:
             return
         t = self.t
-        for v in frame["vehicles"]:
-            m = re.search(r"(\d+)", v["id"])
-            if m:
-                v["station"] = int(m.group(1))
         rep = self._live_rep()
         if rep is None:
             return
@@ -177,7 +227,7 @@ class LiveHub:
             frame["messages"] = msgs
 
     async def _finish(self) -> None:
-        await self._broadcast({"type": "end", "t": round(self.t, 1)})
+        self._broadcast({"type": "end", "t": round(self.t, 1)})
         self._close_bridge()
         self.paused = False
         await self._set_status("ended", "simulación finalizada: esperando la "
@@ -195,32 +245,37 @@ class LiveHub:
     def status_msg(self) -> dict:
         return {"type": "status", "status": self.status, "detail": self.detail,
                 "paused": self.paused, "viewers": len(self.viewers),
-                "t": round(self.t, 1)}
+                "t": round(self.t, 1), "frame_ms": round(self.frame_ms, 1),
+                "dropped": sum(v.dropped for v in self.viewers.values())}
 
     async def _set_status(self, status: str, detail: str) -> None:
         if (status, detail) == (self.status, self.detail):
             return
         self.status, self.detail = status, detail
-        await self._broadcast(self.status_msg())
+        self._broadcast(self.status_msg())
 
-    async def _broadcast(self, msg: dict) -> None:
-        dead = []
-        for ws in list(self.viewers):
-            try:
-                await ws.send_json(msg)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.viewers.discard(ws)
+    def _broadcast(self, msg: dict) -> None:
+        text = encode(msg)
+        for v in list(self.viewers.values()):
+            v.push(text, coalesce=False)
+
+    def _broadcast_frame(self, frame: dict) -> None:
+        text = encode(frame)                  # UNA serialización para todos
+        for v in list(self.viewers.values()):
+            v.push(text, coalesce=True)
 
     async def serve(self, ws: WebSocket) -> None:
         """Un visor: se suscribe a los frames y manda órdenes globales."""
-        self.viewers.add(ws)
+        viewer = Viewer(ws)
+        viewer.task = asyncio.create_task(viewer.sender())
+        self.viewers[ws] = viewer
         try:
-            await ws.send_json({"type": "meta", **self._state["meta"]})
-            await ws.send_json(self.status_msg())
+            viewer.push(encode({"type": "meta", **self._state["meta"], "proto": 2}),
+                        coalesce=False)
+            viewer.push(encode(self.status_msg()), coalesce=False)
             if self.last_frame is not None:        # pintar al instante tras recargar
-                await ws.send_json(self.last_frame)
+                viewer.push(encode(self.builder.snapshot(self.last_frame)),
+                            coalesce=False)
             while True:
                 try:
                     cmd = await ws.receive_json()
@@ -233,7 +288,7 @@ class LiveHub:
                     # Se difunde el estado igualmente para re-sincronizar el botón.
                     if self.status == "running":
                         self.paused = action == "pause"
-                    await self._broadcast(self.status_msg())
+                    self._broadcast(self.status_msg())
                 elif action == "speed":
                     self.period = 1.0 / max(float(cmd.get("fps", settings.max_fps)), 0.1)
                 elif action == "inspect":
@@ -246,11 +301,13 @@ class LiveHub:
                                     self.bridge.vehicle_details, vid)
                         except Exception:
                             pass
-                    await ws.send_json({"type": "inspect", **details})
+                    viewer.push(encode({"type": "inspect", **details}), coalesce=False)
         except WebSocketDisconnect:
             pass
         except Exception:  # noqa: BLE001
             traceback.print_exc()
         finally:
-            self.viewers.discard(ws)
+            self.viewers.pop(ws, None)
+            if viewer.task:
+                viewer.task.cancel()
             # el hold (sin visores) se reevalúa solo en el bucle de _stream

@@ -11,3 +11,5 @@ eclipse-sumo==1.27.1
 traci==1.27.1
 sumolib==1.27.1
 pyproj>=3.6            # REQUIRED for real (projected) OSM nets: convertXY2LonLat
+
+orjson>=3.9           # serialización de frames (10x json); ver app/frames.py
