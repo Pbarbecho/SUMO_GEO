@@ -29,7 +29,8 @@ from fastapi.responses import JSONResponse
 from .config import settings
 from .frames import FrameBuilder, encode
 from .geo import (NetworkGeo, buildings_geojson, building_vertices_local,
-                  cfg_paths, trafficlights_geojson)
+                  cfg_paths, landuse_geojson, trafficlights_geojson,
+                  trees_geojson, walkways_geojson)
 from .sumo_bridge import SumoBridge
 
 _state: dict = {}
@@ -71,12 +72,26 @@ async def lifespan(app: FastAPI):
     _state["buildings"] = _Static(buildings_geojson(poly_file, netgeo))
     _state["trafficlights"] = _Static(trafficlights_geojson(
         netgeo, building_vertices_local(poly_file)))
+    # entorno: zonas verdes/agua/parkings, árboles y aceras/cruces (si la red
+    # se generó con --sidewalks.guess --crossings.guess)
+    landuse = landuse_geojson(poly_file, netgeo)
+    trees = trees_geojson(poly_file, netgeo)
+    walkways = walkways_geojson(net_file, netgeo)
+    _state["landuse"] = _Static(landuse)
+    _state["trees"] = _Static(trees)
+    _state["walkways"] = _Static(walkways)
     meta = {
         **netgeo.bounds_center(),
         "origin": [settings.origin_lon, settings.origin_lat],
         "step_length": settings.step_length,
         "mode": settings.sumo_mode,
         "proto": 2,
+        "landuse": len(landuse["features"]),
+        "trees": len(trees["features"]),
+        "sidewalks": sum(1 for f in walkways["features"]
+                         if f["properties"]["kind"] == "sidewalk"),
+        "crossings": sum(1 for f in walkways["features"]
+                         if f["properties"]["kind"] == "crossing"),
     }
     if settings.view_lon is not None and settings.view_lat is not None:
         meta["center"] = [settings.view_lon, settings.view_lat]   # open on the demand area
@@ -132,6 +147,21 @@ async def buildings(request: Request):
 @app.get("/api/trafficlights")
 async def trafficlights(request: Request):
     return _state["trafficlights"].response(request)
+
+
+@app.get("/api/landuse")
+async def landuse(request: Request):
+    return _state["landuse"].response(request)
+
+
+@app.get("/api/trees")
+async def trees(request: Request):
+    return _state["trees"].response(request)
+
+
+@app.get("/api/walkways")
+async def walkways(request: Request):
+    return _state["walkways"].response(request)
 
 
 def _replay_fingerprint():

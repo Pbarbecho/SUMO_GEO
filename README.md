@@ -35,6 +35,13 @@ install, no game engine — on the web-native **MapLibre GL JS + deck.gl** stack
   "day" palette (buildings `#f1e5db`, roads `#b3bbd3`, green `#d1edcc`).
 - **Real-time traffic estimation** — per-edge density → HCM-style LOS (A–F)
   colour ramp; roads have a dark casing and **lane dividers on 2+ lane streets**.
+- **Environment** — green areas, water, parking and sport grounds from the
+  `.poly.xml` (`/api/landuse`), **sidewalks with a curb** (real pedestrian lanes
+  when the net was built with `--sidewalks.guess`, otherwise a band on both
+  sides of every street), **zebra crossings** (`--crossings.guess`), dashed lane
+  markings and **3D trees** (`/api/trees`: OSM `natural=tree` plus a procedural
+  fill inside parks and woods, instanced glTF). Toggles *Veredas y zonas verdes*
+  and *Árboles 3D*.
 - **SUMO-synchronised traffic lights** — one signal head per approach at the stop
   line, mast-arm ("ménsula") on open junctions / straight pole elsewhere, coloured
   live from SUMO's phase state, always visible over buildings.
@@ -86,6 +93,8 @@ built from OSM (`sumo/cuenca.*`, with 3D buildings). The metropolitan network
 | Congestión (LOS) | Toggle congestion colouring (A–F legend at the bottom) |
 | Semáforos | Toggle the traffic-light layer |
 | PoI | Show/hide basemap points of interest (shops, bus stops…) — hidden by default |
+| Veredas y zonas verdes | Sidewalks with curb, green/water/parking areas, crossings and lane markings |
+| Árboles 3D | Instanced glTF trees (off by default in *Modo ligero*) |
 | Calles concurridas + ≥ N veh | Floating pins on streets with ≥ N vehicles (live count) |
 | **Modo ligero** | Low-resource rendering (1× pixel ratio, no antialias, buildings off, 20 fps animation); remembered, reloads the page. Also `?lite=1` |
 
@@ -223,7 +232,7 @@ random trips + synthetic building footprints → `sumo/grid.net.xml`,
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/health` · `/api/meta` | Liveness · map centre/bounds/config |
-| `GET /api/network` · `/api/buildings` · `/api/trafficlights` | Static geometry (GeoJSON, cached) |
+| `GET /api/network` · `/api/buildings` · `/api/trafficlights` · `/api/landuse` · `/api/walkways` · `/api/trees` | Static geometry (GeoJSON, cached, pre-gzipped) |
 | `WS /ws/live?level=low\|mid\|high` | Frames (protocol v2): `v` flat rows `[id, lon, lat, angle, speed, …]`, `vnew` `{id: [type, len, wid, station]}` (first appearance / `snapshot`), `vgone`, `edges` rows `[id, n, occ, speed, density, los]` every `APP_LOS_EVERY` frames, `tls` on change, `stats` |
 
 WS client → server: `{"cmd":"pause"|"play"}`, `{"cmd":"speed","fps":N}`,
@@ -311,7 +320,8 @@ sumo/               Centro + demo: cuenca.{net,poly,sumocfg}, cuenca_{low,mid,hi
                     grid demo, vtypes.add.xml, transit.add.xml
 mapa/               Metro: metro_{low,mid,high}.{rou.xml,sumocfg}, vtypes, transit
                     (network.net.xml git-ignored — rebuild with build_city.sh)
-scripts/            build_city.sh · gen_traffic.py · enrich_heights.py · generate_scenario.sh
+scripts/            build_city.sh (now with sidewalks/crossings/full poly types) · gen_traffic.py ·
+                    enrich_heights.py · generate_scenario.sh · make_tree_glb.py · bench_backend.py
 docs/               tool-evaluation report (.docx) + comparison matrix (.xlsx)
 docker-compose.yml  backend + nginx frontend (:8082); scenario switch block inside
 ROADMAP.md          phased technical plan

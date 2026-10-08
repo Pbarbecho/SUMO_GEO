@@ -14,6 +14,8 @@ const els = {
   buildings: document.getElementById("toggle-buildings"),
   congestion: document.getElementById("toggle-congestion"),
   tl: document.getElementById("toggle-tl"),
+  env: document.getElementById("toggle-env"),
+  trees: document.getElementById("toggle-trees"),
   poi: document.getElementById("toggle-poi"),
   busy: document.getElementById("toggle-busy"),
   lite: document.getElementById("toggle-lite"),
@@ -781,6 +783,12 @@ async function boot() {
     // edificios SUMO (buildings-3d) y los vehículos (deck) se añaden después.
     const firstExtrusion = map.getStyle().layers.find((l) => l.type === "fill-extrusion");
     const roadsBeforeId = (firstExtrusion && firstExtrusion.id) || labelLayerId;
+    // --- entorno: zonas verdes / agua / aparcamientos (polígonos del .poly),
+    // aceras y cruces (de la red, si se generó con --sidewalks.guess) ---------
+    const [landuse, walkways, treesGeo] = await Promise.all([
+      fetchJSON("/api/landuse"), fetchJSON("/api/walkways"), fetchJSON("/api/trees")]);
+    addEnvironmentLayers(landuse, walkways, roadsBeforeId, meta);
+    treeData = treesGeo;
     map.addLayer({ id: "road-casing", type: "line", source: "roads",
       layout: { "line-cap": "round", "line-join": "round" },
       paint: { "line-color": "#404656", "line-width": metersToPx(["+", ["get", "w"], 0.6]) } },
@@ -789,10 +797,20 @@ async function boot() {
       layout: { "line-cap": "round", "line-join": "round" },
       paint: { "line-color": roadColorExpr(), "line-width": metersToPx(["get", "w"]) } },
       roadsBeforeId);
+    // marcas viales: línea discontinua entre carriles (3 m pintados, 3 m vacíos)
     map.addLayer({ id: "lane-lines", type: "line", source: "roads",
       filter: [">=", ["get", "lanes"], 2],
-      paint: { "line-color": "#f2f2ec", "line-width": metersToPx(0.3, 0.6, 2) } },
+      paint: { "line-color": "#f2f2ec", "line-width": metersToPx(0.25, 0.6, 2),
+               "line-dasharray": [12, 12] } },
       roadsBeforeId);
+    // borde exterior de calzada (línea blanca continua) solo a zoom cercano
+    map.addLayer({ id: "road-edge-line", type: "line", source: "roads", minzoom: 16,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": "#f2f2ec", "line-opacity": 0.7,
+               "line-gap-width": metersToPx(["-", ["get", "w"], 0.5]),
+               "line-width": metersToPx(0.18, 0.5, 1.5) } },
+      roadsBeforeId);
+    addCrossingLayers(roadsBeforeId);
     // --- extruded building polygons (native MapLibre fill-extrusion) --------
     const buildings = await fetchJSON("/api/buildings");
     map.addSource("buildings", { type: "geojson", data: buildings });
@@ -817,6 +835,8 @@ async function boot() {
     if (liteMode && els.buildings.checked) {     // ligero: edificios apagados al inicio
       els.buildings.checked = false; setBuildingsVisible(false);
     }
+    if (liteMode && els.trees) { els.trees.checked = false; showTrees = false; }
+    if (els.env) { showEnv = els.env.checked; setEnvVisible(showEnv); }
     tlDefs = await fetchJSON("/api/trafficlights");
     splitTrafficLights();
     // deck.gl comparte el canvas de MapLibre: su escala de píxeles debe ser la
@@ -873,6 +893,102 @@ function applyEdges(rows) {
   losActive = next;
 }
 let tlStamp = 0;          // bumped only when a traffic-light state string changes
+
+// --- entorno (veredas, zonas verdes, agua, cruces) y árboles 3D --------------
+// Capas NATIVAS de MapLibre (teseladas una vez, sin coste por frame). Orden
+// de inserción (todas antes de roadsBeforeId): landuse -> aceras/bordillo ->
+// calzada (road-casing, road-surface, lane-lines) -> cruces.
+const SIDEWALK_W = 1.8;          // m a cada lado cuando la red no trae aceras
+const LANDUSE_COLORS = ["match", ["get", "kind"],
+  "park", "#9fd08a", "grass", "#b7d9a2", "wood", "#7fbf72", "sport", "#8fcf9b",
+  "water", "#9ec4e3", "parking", "#c9c6c0", "#c4d9b4"];
+let showEnv = true, showTrees = true;
+let treeData = null;             // GeoJSON de /api/trees
+let hasSidewalks = false;        // la red trae carriles peatonales (netconvert --sidewalks.guess)
+const ENV_LAYERS = ["landuse-fill", "landuse-outline", "water-fill", "sidewalk-band", "curb",
+                    "walkway-fill", "walkway-edge", "crossing-zebra", "lane-lines", "road-edge-line"];
+
+function addEnvironmentLayers(landuse, walkways, beforeId, meta) {
+  hasSidewalks = (meta.sidewalks || 0) > 0;
+  map.addSource("landuse", { type: "geojson", data: landuse, tolerance: 0.5 });
+  map.addSource("walkways", { type: "geojson", data: walkways, tolerance: 0.3 });
+  // zonas verdes, deporte y aparcamientos: relleno plano bajo las calles
+  map.addLayer({ id: "landuse-fill", type: "fill", source: "landuse",
+    filter: ["!=", ["get", "kind"], "water"],
+    paint: { "fill-color": LANDUSE_COLORS, "fill-opacity": 0.9 } }, beforeId);
+  map.addLayer({ id: "landuse-outline", type: "line", source: "landuse",
+    filter: ["!=", ["get", "kind"], "water"], minzoom: 15,
+    paint: { "line-color": "#7da56a", "line-opacity": 0.45, "line-width": 1 } }, beforeId);
+  // agua ligeramente translúcida sobre el mapa base
+  map.addLayer({ id: "water-fill", type: "fill", source: "landuse",
+    filter: ["==", ["get", "kind"], "water"],
+    paint: { "fill-color": "#9ec4e3", "fill-opacity": 0.85 } }, beforeId);
+  if (hasSidewalks) {
+    // aceras y áreas peatonales reales: extrusión de 15 cm (bordillo) en gris claro
+    map.addLayer({ id: "walkway-fill", type: "fill-extrusion", source: "walkways",
+      filter: ["any", ["==", ["get", "kind"], "sidewalk"], ["==", ["get", "kind"], "walkingarea"]],
+      paint: { "fill-extrusion-color": "#d8d5cd", "fill-extrusion-height": 0.15,
+               "fill-extrusion-base": 0, "fill-extrusion-opacity": 1 } }, beforeId);
+  } else {
+    // sin datos de aceras: banda de acera + bordillo a ambos lados de cada calle
+    map.addLayer({ id: "sidewalk-band", type: "line", source: "roads",
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": "#d8d5cd",
+               "line-width": metersToPx(["+", ["get", "w"], 2 * SIDEWALK_W]) } }, beforeId);
+    map.addLayer({ id: "curb", type: "line", source: "roads",
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": "#aaa69e",
+               "line-width": metersToPx(["+", ["get", "w"], 1.0]) } }, beforeId);
+  }
+}
+function addCrossingLayers(beforeId) {
+  // pasos de cebra: franjas blancas perpendiculares al eje del cruce (dash
+  // a lo largo del eje = franjas a lo ancho de la calzada), encima de la calzada
+  map.addLayer({ id: "crossing-zebra", type: "line", source: "walkways",
+    filter: ["==", ["get", "kind"], "crossing-line"],
+    paint: { "line-color": "#f4f4f0", "line-opacity": 0.92,
+             "line-width": metersToPx(["get", "w"]), "line-dasharray": [0.5, 0.5] } }, beforeId);
+}
+function setEnvVisible(show) {
+  if (!map) return;
+  for (const id of ENV_LAYERS) {
+    if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", show ? "visible" : "none");
+  }
+}
+
+// Árboles como glTF instanciados (misma técnica que los vehículos, pero
+// estáticos: los atributos binarios se construyen UNA vez). Dos variantes:
+// 0 copa redonda (tree.glb, ~7 m), 1 pino (tree-pine.glb, ~9 m).
+const TREE_MODELS = ["models/tree.glb", "models/tree-pine.glb"];
+let _treeLayers = null;
+function makeTreeLayers() {
+  if (!showTrees || !treeData || !vehModelsOk) return [];
+  if (_treeLayers) return _treeLayers;
+  const groups = [[], []];
+  for (const f of treeData.features) groups[f.properties.k === 1 ? 1 : 0].push(f);
+  _treeLayers = [];
+  groups.forEach((feats, k) => {
+    if (!feats.length) return;
+    const n = feats.length;
+    const pos = new Float64Array(n * 3), mat = new Float32Array(n * 12);
+    feats.forEach((f, i) => {
+      const [lon, lat] = f.geometry.coordinates;
+      pos[i * 3] = lon; pos[i * 3 + 1] = lat; pos[i * 3 + 2] = 0;
+      const s = f.properties.s || 1, yaw = (f.properties.r || 0) * RAD;
+      const cw = Math.cos(yaw), sw = Math.sin(yaw), o = i * 12;
+      mat[o] = s * cw; mat[o + 1] = s * sw; mat[o + 3] = -s * sw; mat[o + 4] = s * cw; mat[o + 8] = s;
+    });
+    _treeLayers.push(new deck.ScenegraphLayer({
+      id: "trees-" + k,
+      data: { length: n, attributes: { getPosition: { value: pos, size: 3 },
+                                       instanceModelMatrix: { value: mat, size: 12 } } },
+      scenegraph: TREE_MODELS[k], loaders: [loaders.GLTFLoader],
+      sizeScale: 1, _lighting: "pbr", pickable: false,
+      onError: () => { _treeLayers = []; },
+    }));
+  });
+  return _treeLayers;
+}
 
 // procedural 3D vehicles (shadow, chassis, wheels, windshield, roof, lights),
 // with LOD: simple boxes when there are thousands of vehicles or zoomed out.
@@ -950,8 +1066,9 @@ function makeDetectionLayer() {
 }
 
 function buildLayers() {
-  // la red vial vive en MapLibre (ver boot); aquí solo capas dinámicas de deck
-  const layers = [];
+  // la red vial vive en MapLibre (ver boot); aquí capas de deck: árboles
+  // (estáticos, construidos una vez), semáforos, vehículos, pins
+  const layers = [...makeTreeLayers()];
 
   // traffic lights, coloured live from SUMO. Open junctions get a mast-arm
   // ("ménsula") with the head hanging over the road; tight ones a straight pole.
@@ -1782,6 +1899,8 @@ if (els.lite) els.lite.onchange = () => {
   location.reload();                          // pixelRatio/antialias se fijan al crear el mapa
 };
 els.tl.onchange = () => { showTL = els.tl.checked; refreshLayers(); };
+if (els.env) els.env.onchange = () => { showEnv = els.env.checked; setEnvVisible(showEnv); };
+if (els.trees) els.trees.onchange = () => { showTrees = els.trees.checked; refreshLayers(); };
 els.poi.onchange = () => setPoiVisible(els.poi.checked);
 els.busy.onchange = () => { showBusy = els.busy.checked; refreshLayers(); };
 els.busyMin.oninput = () => { busyMin = Number(els.busyMin.value); els.busyVal.textContent = busyMin; refreshLayers(); };

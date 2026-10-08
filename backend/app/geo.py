@@ -174,6 +174,215 @@ def buildings_geojson(poly_path: Optional[str], netgeo: NetworkGeo) -> dict:
     return {"type": "FeatureCollection", "features": features}
 
 
+# --- entorno: zonas verdes, agua, aparcamientos, árboles y aceras -------------
+# Clasificación de los polígonos NO edificio del .poly.xml de polyconvert.
+# Con --osm.keep-full-type el tipo trae el subtipo (natural.water); sin él
+# (ficheros antiguos) se desambigua por el color del typemap osmPolyconvert.
+_WATER_COLORS = {"181,209,209", "71,165,255", "0.71,0.82,0.82"}
+_GREEN_COLORS = {"207,245,201", "140,196,107", "194,194,130", "242,242,204",
+                 "79,230,125", "0.81,0.96,0.79", "0.55,0.77,0.42"}
+
+
+def landuse_kind(ptype: str, color: str) -> Optional[str]:
+    """park | grass | wood | water | parking | sport | None (no se dibuja)."""
+    t = (ptype or "").lower()
+    c = (color or "").replace(" ", "")
+    if t.startswith("building"):
+        return None
+    if "water" in t or "bay" in t or "wetland" in t or "river" in t or c in _WATER_COLORS:
+        return "water"
+    if "parking" in t:
+        return "parking"
+    if "sport" in t or "pitch" in t or "playground" in t:
+        return "sport"
+    if "wood" in t or "forest" in t:
+        return "wood"
+    if "park" in t or "garden" in t or "leisure" in t:
+        return "park"
+    if ("grass" in t or "meadow" in t or "village_green" in t or "greenfield" in t
+            or "farm" in t or "cemetery" in t or t == "natural" or t == "landuse"
+            or c in _GREEN_COLORS):
+        return "grass"
+    return None
+
+
+def landuse_geojson(poly_path: Optional[str], netgeo: NetworkGeo) -> dict:
+    """Polígonos de entorno (verde, agua, aparcamiento, deporte) como GeoJSON."""
+    features: list[dict] = []
+    if not poly_path or not os.path.exists(poly_path):
+        return {"type": "FeatureCollection", "features": features}
+    root = ET.parse(poly_path).getroot()
+    for poly in root.iter("poly"):
+        kind = landuse_kind(poly.get("type", ""), poly.get("color", ""))
+        if kind is None:
+            continue
+        ring: list[list[float]] = []
+        for pair in poly.get("shape", "").split():
+            parts = pair.split(",")
+            if len(parts) >= 2:
+                ring.append([round(c, 6) for c in
+                             netgeo.xy_to_lonlat(float(parts[0]), float(parts[1]))])
+        if len(ring) < 3:
+            continue
+        if ring[0] != ring[-1]:
+            ring.append(ring[0])
+        features.append({"type": "Feature",
+                         "geometry": {"type": "Polygon", "coordinates": [ring]},
+                         "properties": {"id": poly.get("id"), "kind": kind}})
+    return {"type": "FeatureCollection", "features": features}
+
+
+def _point_in_ring(x: float, y: float, ring: list) -> bool:
+    inside = False
+    j = len(ring) - 1
+    for i in range(len(ring)):
+        xi, yi = ring[i]
+        xj, yj = ring[j]
+        if (yi > y) != (yj > y):
+            xint = (xj - xi) * (y - yi) / ((yj - yi) or 1e-12) + xi
+            if x < xint:
+                inside = not inside
+        j = i
+    return inside
+
+
+def trees_geojson(poly_path: Optional[str], netgeo: NetworkGeo,
+                  max_trees: int = 6000) -> dict:
+    """Árboles: los reales de OSM (POI natural=tree del .poly.xml) más un
+    relleno procedural, determinista, dentro de parques y bosques (malla con
+    jitter, 12-14 m entre árboles en parques, 8 m en bosques). Cada punto lleva
+    ``k`` (variante: 0 copa redonda, 1 pino), ``s`` (escala) y ``r`` (giro)."""
+    features: list[dict] = []
+    if not poly_path or not os.path.exists(poly_path):
+        return {"type": "FeatureCollection", "features": features}
+    root = ET.parse(poly_path).getroot()
+    pts: list[tuple] = []                    # (x, y, kind)
+    # 1) árboles mapeados (POI natural, color del typemap "natural")
+    for poi in root.iter("poi"):
+        t = (poi.get("type") or "").lower()
+        if t.startswith("natural") and poi.get("x") and poi.get("y"):
+            if "tree" in t or t == "natural":
+                pts.append((float(poi.get("x")), float(poi.get("y")), "tree"))
+    # 2) relleno procedural en verde
+    for poly in root.iter("poly"):
+        kind = landuse_kind(poly.get("type", ""), poly.get("color", ""))
+        if kind not in ("park", "wood", "grass"):
+            continue
+        ring = []
+        for pair in poly.get("shape", "").split():
+            p = pair.split(",")
+            if len(p) >= 2:
+                ring.append((float(p[0]), float(p[1])))
+        if len(ring) < 3:
+            continue
+        xs = [p[0] for p in ring]
+        ys = [p[1] for p in ring]
+        spacing = {"wood": 8.0, "park": 13.0, "grass": 22.0}[kind]
+        # área aproximada (shoelace) para no sembrar parcelas diminutas
+        area = abs(sum(ring[i][0] * ring[(i + 1) % len(ring)][1]
+                       - ring[(i + 1) % len(ring)][0] * ring[i][1]
+                       for i in range(len(ring)))) / 2.0
+        if area < spacing * spacing * 1.5:
+            continue
+        seed = hash(poly.get("id")) & 0xFFFF
+        y = min(ys) + spacing * 0.5
+        row = 0
+        while y < max(ys):
+            x = min(xs) + spacing * (0.25 if row % 2 else 0.75)
+            while x < max(xs):
+                h = (seed + int(x * 7.1) * 31 + int(y * 3.7) * 17) & 0xFF
+                jx = (h / 255.0 - 0.5) * spacing * 0.6
+                jy = (((h * 7) & 0xFF) / 255.0 - 0.5) * spacing * 0.6
+                px, py = x + jx, y + jy
+                if _point_in_ring(px, py, ring):
+                    pts.append((px, py, kind))
+                x += spacing
+            y += spacing * 0.87
+            row += 1
+    if len(pts) > max_trees:                  # diezmar uniformemente
+        step = len(pts) / max_trees
+        pts = [pts[int(i * step)] for i in range(max_trees)]
+    for x, y, kind in pts:
+        h = (int(x * 13) * 31 + int(y * 7) * 17) & 0xFF
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates":
+                         [round(c, 6) for c in netgeo.xy_to_lonlat(x, y)]},
+            "properties": {"k": 1 if (kind == "wood" and h % 3 == 0) else 0,
+                           "s": round(0.75 + (h / 255.0) * 0.55, 2),
+                           "r": (h * 11) % 360}})
+    return {"type": "FeatureCollection", "features": features}
+
+
+def walkways_geojson(net_path: str, netgeo: NetworkGeo) -> dict:
+    """Aceras (carriles solo peatones), pasos de cebra y áreas peatonales de
+    la red (netconvert --sidewalks.guess --crossings.guess). Polígonos en
+    WGS84 con ``kind``: sidewalk | crossing | walkingarea; los crossings
+    llevan además ``line`` (eje) y ``w`` (anchura, m) para la zebra."""
+    features: list[dict] = []
+    if not net_path or not os.path.exists(net_path):
+        return {"type": "FeatureCollection", "features": features}
+
+    def shape_xy(s: str):
+        out = []
+        for pair in s.split():
+            p = pair.split(",")
+            if len(p) >= 2:
+                out.append((float(p[0]), float(p[1])))
+        return out
+
+    def buffer_line(pts, w):
+        """polígono de una polilínea con anchura w (offset simple por vértice)."""
+        if len(pts) < 2:
+            return None
+        left, right = [], []
+        hw = w / 2.0
+        for i, (x, y) in enumerate(pts):
+            x0, y0 = pts[max(i - 1, 0)]
+            x1, y1 = pts[min(i + 1, len(pts) - 1)]
+            dx, dy = x1 - x0, y1 - y0
+            ln = math.hypot(dx, dy) or 1.0
+            nx, ny = -dy / ln * hw, dx / ln * hw
+            left.append((x + nx, y + ny))
+            right.append((x - nx, y - ny))
+        ring = left + right[::-1]
+        ring.append(ring[0])
+        return [[round(c, 6) for c in netgeo.xy_to_lonlat(x, y)] for x, y in ring]
+
+    for edge in ET.parse(net_path).getroot().iter("edge"):
+        func = edge.get("function", "")
+        for lane in edge.findall("lane"):
+            allow = lane.get("allow", "")
+            shape = shape_xy(lane.get("shape", ""))
+            w = float(lane.get("width", "2.0") or 2.0)
+            if func == "crossing":
+                ring = buffer_line(shape, w)
+                if ring:
+                    features.append({"type": "Feature",
+                                     "geometry": {"type": "Polygon", "coordinates": [ring]},
+                                     "properties": {"kind": "crossing", "w": round(w, 2)}})
+                    features.append({"type": "Feature",
+                                     "geometry": {"type": "LineString", "coordinates": [
+                                         [round(c, 6) for c in netgeo.xy_to_lonlat(x, y)]
+                                         for x, y in shape]},
+                                     "properties": {"kind": "crossing-line", "w": round(w, 2)}})
+            elif func == "walkingarea":
+                if len(shape) >= 3:
+                    ring = [[round(c, 6) for c in netgeo.xy_to_lonlat(x, y)] for x, y in shape]
+                    if ring[0] != ring[-1]:
+                        ring.append(ring[0])
+                    features.append({"type": "Feature",
+                                     "geometry": {"type": "Polygon", "coordinates": [ring]},
+                                     "properties": {"kind": "walkingarea"}})
+            elif not func and allow == "pedestrian":
+                ring = buffer_line(shape, w)
+                if ring:
+                    features.append({"type": "Feature",
+                                     "geometry": {"type": "Polygon", "coordinates": [ring]},
+                                     "properties": {"kind": "sidewalk", "w": round(w, 2)}})
+    return {"type": "FeatureCollection", "features": features}
+
+
 def building_vertices_local(poly_path: Optional[str]) -> list:
     """All building-polygon vertices in SUMO local (x, y) metres."""
     verts: list = []

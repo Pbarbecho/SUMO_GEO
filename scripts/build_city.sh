@@ -43,14 +43,21 @@ echo "1/4  Descargando OSM ($BBOX)…"
 OSM="${NAME}_bbox.osm.xml"
 
 echo "2/4  Red de calles (proyectada UTM)…"
+# --sidewalks.guess / --crossings.guess: aceras (carriles peatonales) y pasos
+# de cebra en la red, que el visor dibuja en 3D (bordillo, zebra). Sin ellos
+# el visor dibuja una acera genérica a ambos lados de cada calle.
 netconvert --osm-files "$OSM" -o "${NAME}.net.xml" \
   --geometry.remove --ramps.guess --junctions.join \
   --tls.guess-signals --tls.discard-simple --tls.join \
+  --sidewalks.guess --crossings.guess \
   --remove-edges.isolated --keep-edges.by-vclass passenger
 
-echo "3/4  Polígonos de edificios (+ alturas desde OSM)…"
+echo "3/4  Polígonos de edificios, zonas verdes y agua (+ alturas desde OSM)…"
+# --osm.keep-full-type conserva el subtipo (natural.water, leisure.park,
+# landuse.grass…) que el visor usa para colorear zonas verdes, agua y parkings.
 polyconvert --osm-files "$OSM" --net-file "${NAME}.net.xml" \
   --type-file "$SUMO_HOME/data/typemap/osmPolyconvert.typ.xml" \
+  --osm.keep-full-type \
   -o "${NAME}.poly.xml"
 "$PY" "$HERE/enrich_heights.py" "$OSM" "${NAME}.poly.xml"
 
