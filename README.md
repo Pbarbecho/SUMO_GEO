@@ -148,21 +148,81 @@ Switching family = edit the marked block in `docker-compose.yml`, then
 
 ## Scripts reference (`scripts/`)
 
-### `build_city.sh` — import a real city from OpenStreetMap
+### `build_city.sh` — generate the SUMO scenario files, with the realism built in
 
-Builds a **projected, georeferenced** scenario (roads + buildings) that aligns
-exactly with the web map. Needs SUMO tools + internet on the host.
+The 3D realism of the viewer (buildings with real heights, sidewalks with a
+curb, zebra crossings, green areas, water, parking lots, trees) is **not
+painted by the frontend from the basemap**: every one of those layers is read
+by the backend from the **SUMO scenario files themselves** (`.net.xml` and
+`.poly.xml`). So the workflow is always *first generate the SUMO files, then
+point the viewer at them*, and `build_city.sh` is the script that generates
+those files **already carrying the information the viewer needs**. A network
+built by hand with plain `netconvert` or with `osmWebWizard` runs fine in SUMO
+and ns-3, but the viewer will only be able to draw a generic sidewalk band and
+no crossings or trees (see the table below).
+
+Needs the SUMO tools and internet on the host (OpenStreetMap / Overpass):
 
 ```bash
-export SUMO_HOME=/path/to/sumo        # or: pip3 install eclipse-sumo sumolib
-./scripts/build_city.sh "W,S,E,N" [name]
+pip3 install eclipse-sumo sumolib    # or export SUMO_HOME=/path/to/sumo
+./scripts/build_city.sh "W,S,E,N" [name]        # bbox = minLon,minLat,maxLon,maxLat
 ./scripts/build_city.sh "-79.010,-2.903,-79.000,-2.893" cuenca   # Cuenca centro
 ```
 
-Pipeline: `osmGet.py` (download) → `netconvert` (roads, **`--tls.guess-signals`**
-so traffic lights exist) → `polyconvert` (building footprints) →
-`enrich_heights.py` (real heights) → `randomTrips.py` (short demo demand) →
-writes `sumo/<name>.net.xml`, `<name>.poly.xml`, `<name>.sumocfg`.
+The four steps, and what each one contributes to the picture:
+
+| Step | Tool | Output (`sumo/`) | What the viewer gets from it |
+|---|---|---|---|
+| 1 Download | `osmGet.py --bbox` | `<name>_bbox.osm.xml` (git-ignored, keep it) | Raw OSM extract; reused by steps 2-3 and by the offline upgrade below |
+| 2 Road network | `netconvert … --tls.guess-signals --sidewalks.guess --crossings.guess` | `<name>.net.xml` (UTM projected) | Roads/lanes/LOS, traffic lights, **real sidewalks** (`allow="pedestrian"` lanes → band + curb), **zebra crossings** and walking areas (`function="crossing"` / `walkingarea`) |
+| 3 Polygons | `polyconvert … --osm.keep-full-type` + `enrich_heights.py` | `<name>.poly.xml` | **3D buildings** (`height` / `building:levels` × 3 m), **green areas / water / parking / sport** from the full OSM subtype (`leisure.park`, `natural.water`, `amenity.parking`…), **trees**: mapped `natural.tree` POIs plus a procedural fill inside parks, woods and grass |
+| 4 Demand | `randomTrips.py` | `<name>.trips.xml`, `<name>.rou.xml`, `<name>.sumocfg` | A short demo demand (600 s) so the scenario runs out of the box; replace it with `gen_traffic.py` for the Bajo/Medio/Alto levels |
+
+Because the network is projected (UTM), the backend georeferences it with
+SUMO's own `convertXY2LonLat`, so roads, sidewalks and polygons align exactly
+with the MapLibre basemap.
+
+**Which file feeds which layer** (what you lose if a file lacks it):
+
+| Viewer layer | Needs | Without it |
+|---|---|---|
+| Roads, lanes, LOS, signals | any `.net.xml` | — |
+| Sidewalks with curb | lanes `allow="pedestrian"` (`--sidewalks.guess`) | a generic 1.8 m band on both sides of every street |
+| Zebra crossings, walking areas | `--crossings.guess` (`function="crossing"` / `walkingarea` edges) | none |
+| 3D buildings with real heights | `.poly.xml` + `enrich_heights.py` | basemap buildings only (`SUMO_GEO_POLY` unset) |
+| Green areas, water, parking, sport | `.poly.xml`; subtypes resolve best with `--osm.keep-full-type` (generic `natural`/`leisure`/`landuse` types still map to grass/park) | none |
+| Trees | `natural.tree` POIs (needs `--osm.keep-full-type`) + procedural fill in park/wood/grass polygons | only the procedural ones, or none |
+
+**Already have a scenario? Add the realism without re-downloading.** Both
+tools accept the files you already have, work **offline**, and keep every
+edge id, so your existing `.rou.xml` and the ns-3 run stay valid (verified on
+the Cuenca net: 254 edges before and after; 792 sidewalk lanes, 214 crossings
+and 336 walking areas added):
+
+```bash
+export SUMO_HOME=$(python3 -c "import os,sumo;print(os.path.dirname(sumo.__file__))")
+export PATH="$SUMO_HOME/bin:$PATH"
+# a) sidewalks + crossings into an existing net (lane indices shift: the
+#    sidewalk becomes lane _0; routes reference edges, so nothing to change)
+netconvert -s cuenca.net.xml --sidewalks.guess --crossings.guess -o cuenca_ped.net.xml
+mv cuenca_ped.net.xml cuenca.net.xml
+# b) polygons with full OSM subtypes + heights, from the OSM extract you kept
+polyconvert --osm-files map.osm --net-file cuenca.net.xml \
+  --type-file "$SUMO_HOME/data/typemap/osmPolyconvert.typ.xml" \
+  --osm.keep-full-type -o cuenca.poly.xml
+python3 scripts/enrich_heights.py map.osm cuenca.poly.xml
+```
+
+If you no longer have the OSM extract, download it again with
+`osmGet.py --bbox=…` using the `origBoundary` printed in the `<location>`
+line of your `.net.xml`.
+
+**Pointing the viewer at the files.** Managed/replay mode reads them from the
+`sumocfg` (`APP_SUMO_CONFIG`); with ns-3 (van3twin-docker) set
+`SUMO_GEO_NET` / `SUMO_GEO_POLY` in `.env` to the paths **inside the backend
+container** (`./results` is mounted at `/replay`). `GET /api/meta` reports the
+counts the backend found (`landuse`, `trees`, `sidewalks`, `crossings`): zeros
+there mean the file lacks the data, not a rendering problem.
 
 ### `gen_traffic.py` — 24 h multi-level demand generator
 
