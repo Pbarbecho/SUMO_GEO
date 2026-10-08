@@ -1,0 +1,61 @@
+# Publica las imágenes del visor en GitHub Container Registry en cada push a
+# main y en cada tag vX.Y.Z:
+#   ghcr.io/pbarbecho/sumo-geo-backend:{main|vX.Y.Z|sha-…}   (backend/Dockerfile.van3twin)
+#   ghcr.io/pbarbecho/sumo-geo-frontend:{main|vX.Y.Z|sha-…}  (frontend/Dockerfile)
+# Multi-arquitectura (amd64 + arm64): sirven en PC y en Mac Apple Silicon.
+# Los alumnos las usan desde van3twin-docker con `docker compose pull`.
+#
+# Requisito único (una vez, en github.com): tras la primera ejecución, en
+# Packages → sumo-geo-backend / sumo-geo-frontend → Package settings → poner
+# "Public", para que se puedan descargar sin iniciar sesión.
+name: publish-images
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: sumo-geo-backend
+            context: backend
+            dockerfile: backend/Dockerfile.van3twin
+          - name: sumo-geo-frontend
+            context: frontend
+            dockerfile: frontend/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
